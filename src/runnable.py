@@ -46,7 +46,6 @@ class Task(abc.ABC):
 
 
 class Scheduler(abc.ABC):
-    name: str
 
     @property
     @abc.abstractmethod
@@ -81,7 +80,7 @@ class LocalThreadScheduler(Scheduler):
 
     def __init__(self, cache_path: Path, max_runnables: int = 5):
         self.limiter = anyio.CapacityLimiter(max_runnables)
-        if self.cache_path.exists():
+        if cache_path.exists():
             self.runnable_info: TrackedDict = LogDB(cache_path).load_from_log_file()
         else:
             self.runnable_info: TrackedDict = LogDB(cache_path).initialize({})
