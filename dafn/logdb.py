@@ -160,16 +160,16 @@ class TrackedDict(TrackedBase, MutableMapping):
     
     def __setitem__(self, k, v):
         v = mk_tracked(v)._set_parent(self, k)
-        self._logev("set", (k, _encode_tracker(v)))
         self._value[k] = v
+        self._logev("set", (k, _encode_tracker(v)))
 
     def __getitem__(self, k): return self._value[k]
     
     def __delitem__(self, k):
         if k not in self._value:
             raise KeyError(k)
-        self._logev("del", k)
         del self._value[k]
+        self._logev("del", k)
 
     def __iter__(self):
         return iter(self._value)
@@ -252,21 +252,21 @@ class TrackedJsonFinalValue(TrackedFinalValueBase):
     def __init__(self, value):
         super().__init__(value)
 
-    def _dump_value(self) -> str: 
-        return json.dumps(self._value)
+    def _dump_value(self) -> Any: 
+        return json.loads(json.dumps(self._value))
     
     @classmethod
-    def _load_value(cls, s: str) -> Any: 
-        return json.loads(s)
+    def _load_value(cls, s: Any) -> Any: 
+        return s
     
     @classmethod
     def _encode_patch(cls, old_value, new_value) -> Any: 
         patch = jsonpatch.make_patch(old_value, new_value)
-        return patch.to_string()
+        return json.loads(patch.to_string())
     
     @classmethod
     def _apply_patch(cls, old_value, patch) -> Any: 
-        patch = jsonpatch.JsonPatch.from_string(patch)
+        patch = jsonpatch.JsonPatch.from_string(json.dumps(patch))
         return patch.apply(old_value)
 
 from collections.abc import Mapping
@@ -321,23 +321,24 @@ class TrackedList(TrackedBase, MutableSequence):
     # --- list mutation operations ---
     def __setitem__(self, idx, v):
         v = mk_tracked(v)._set_parent(self, idx)
-        self._logev("set", (idx, _encode_tracker(v)))
         self._value[idx] = v
+        self._logev("set", (idx, _encode_tracker(v)))
 
     def __getitem__(self, idx):
         return self._value[idx]
 
     def __delitem__(self, idx):
-        self._logev("del", idx)
+        
         del self._value[idx]
+        self._logev("del", idx)
         # reindex children
         for i in range(idx, len(self._value)):
             self._value[i]._parent_key = i
 
     def insert(self, idx, v):
         v = mk_tracked(v)._set_parent(self, idx)
-        self._logev("insert", (idx, _encode_tracker(v)))
         self._value.insert(idx, v)
+        self._logev("insert", (idx, _encode_tracker(v)))
         # reindex children
         for i in range(idx, len(self._value)):
             self._value[i]._parent_key = i
