@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Type, Union, Callable, Sequence, Literal
 from collections.abc import MutableMapping, MutableSequence, Mapping
 import abc
+
+from attrs import has
 import jsonpatch
 from functools import cached_property
 
@@ -20,8 +22,8 @@ def _decode_tracker(data, _tracked_types: Mapping[str, Type["TrackedBase"]]) -> 
     cls = _tracked_types[t]
     childs = {k: _decode_tracker(v, _tracked_types) for k,v in c.items()}
     r = cls._construct(childs, a)
-    for c in r._childs.values():
-        c._set_parent(r)
+    for k, c in r._childs.items():
+        c._set_parent(r, k)
     return r
 
 
@@ -31,7 +33,7 @@ class AutoWrapper:
 
     def __init__(self, trackers: Optional[Sequence[Type["TrackedBase"]]] = None):
         if trackers is None:
-            trackers = [TrackedJsonFinalValue, TrackedDict]
+            trackers = [TrackedJsonFinalValue, TrackedDict, TrackedList]
         self._TRACKED_TYPES = {t.type_str:t for t in trackers}
         self._WRAP_RULES = [(t.wraps, t) for t in trackers]
         self._CACHED_TYPE_MAPPING = {}
@@ -43,11 +45,11 @@ class AutoWrapper:
         if t not in self._CACHED_TYPE_MAPPING:
             _, cls = max(self._WRAP_RULES, key=lambda rule: rule[0](t))
             self._CACHED_TYPE_MAPPING[t] = cls
-        v = self._CACHED_TYPE_MAPPING[t](v, self)
+        v = self._CACHED_TYPE_MAPPING[t](v)
         return v
 
 
-def mk_tracked(v, auto_wrapper: AutoWrapper | Literal["default", "final"] = "default") -> "TrackedBase":
+def mk_tracked(v, auto_wrapper: Union[AutoWrapper, Literal["default", "final"]] = "default") -> "TrackedBase":
     if auto_wrapper == "default":
         auto_wrapper = _default_auto_wrapper
     elif auto_wrapper =="final":
@@ -66,11 +68,11 @@ class TrackedBase(abc.ABC):
     operations: List[str] 
 
     #values for each instance
-    _parent: "TrackedBase" | None
-    _parent_key: Any | None
+    _parent: Optional["TrackedBase"]
+    _parent_key: Optional[Any]
     
     @cached_property
-    def _root_db(self) -> "LogDB" | None:
+    def _root_db(self) -> Optional["LogDB"]:
         curr = self
         while curr._parent is not None:
             curr = curr._parent
@@ -89,12 +91,14 @@ class TrackedBase(abc.ABC):
         return keys[::-1]
 
     def _set_parent(self, parent: "TrackedBase", key) -> "TrackedBase":
-        if self._parent is not None:
+        if self._parent is not None and self._parent != parent:
+            print(self._parent)
+            print(parent)
             raise Exception("Objects can not change trees for now")
         self._parent = parent
         self._parent_key = key
-        del self._root_db
-        del self._root_path
+        self.__dict__.pop("_root_db", None)
+        self.__dict__.pop("_root_path", None)
         return self
     
     def __init__(self):
@@ -121,26 +125,30 @@ class TrackedBase(abc.ABC):
     @abstractmethod
     def _apply_reconstruct_op(self, op, data) -> None: ...
 
-    
+    def __str__(self):
+        if hasattr(self, "_value"):
+            return "Tracked_"+self.type_str+"("+self._value.__str__()+")"
+        
+    def __repr__(self):
+        if hasattr(self, "_value"):
+            return "Tracked_"+self.type_str+"("+self._value.__repr__()+")"
 
 class TrackedDict(TrackedBase, MutableMapping):
     type_str: str = "dict"
     operations: List[str] = ["set"]
     wraps: Callable[[Type], float] = lambda t: 1.0 if issubclass(t, dict) else 0.0
 
-    def __init__(self, value, wrapper: AutoWrapper = _default_auto_wrapper):
+    def __init__(self, value, wrapper: AutoWrapper = None):
+        if wrapper is None:
+            wrapper = _default_auto_wrapper
         super().__init__()
         self._value = {k: wrapper._create(v)._set_parent(self, k) for k,v in value.items()}
         
     
     @property
-    def _childs(self) -> Mapping[Any, "TrackedBase"] | Sequence["TrackedBase"]: 
+    def _childs(self) -> Union[Mapping[Any, "TrackedBase"], Sequence["TrackedBase"]]: 
         return self._value
     
-    def __setitem__(self, k, v):
-        v = mk_tracked(v)._set_parent(self, k)
-        self._logev("set", (k, _encode_tracker(v)))
-        self._value[k] = v
         
     @property
     def _additional_data(self) -> Any:
@@ -149,6 +157,13 @@ class TrackedDict(TrackedBase, MutableMapping):
     @classmethod
     def _construct(cls, childs, additional_data) -> "TrackedBase": 
         return cls(childs)
+    
+    def __setitem__(self, k, v):
+        v = mk_tracked(v)._set_parent(self, k)
+        self._logev("set", (k, _encode_tracker(v)))
+        self._value[k] = v
+
+    def __getitem__(self, k): return self._value[k]
     
     def __delitem__(self, k):
         if k not in self._value:
@@ -218,21 +233,24 @@ class TrackedFinalValueBase(TrackedBase):
     @abstractmethod
     def _dump_value(self) -> str: ...
     
-    @abstractmethod
     @classmethod
+    @abstractmethod
     def _load_value(cls, s: str) -> Any: ...
     
-    @abstractmethod
     @classmethod
+    @abstractmethod
     def _encode_patch(cls, old_value, new_value) -> Any: ...
     
-    @abstractmethod
     @classmethod
+    @abstractmethod
     def _apply_patch(cls, old_value, patch) -> Any: ...
 
 class TrackedJsonFinalValue(TrackedFinalValueBase):
     type_str: str = "json_value"
     wraps: Callable[[Type], float] = lambda t: 0.1
+
+    def __init__(self, value):
+        super().__init__(value)
 
     def _dump_value(self) -> str: 
         return json.dumps(self._value)
@@ -251,13 +269,37 @@ class TrackedJsonFinalValue(TrackedFinalValueBase):
         patch = jsonpatch.JsonPatch.from_string(patch)
         return patch.apply(old_value)
 
+from collections.abc import Mapping
+
+class SequenceMapping(Mapping):
+    def __init__(self, sequence):
+        self._sequence = sequence
+
+    def __getitem__(self, key):
+        if not isinstance(key, int):
+            raise TypeError("Indices must be integers")
+        try:
+            return self._sequence[key]
+        except IndexError:
+            raise KeyError(key)
+
+    def __iter__(self):
+        return iter(range(len(self._sequence)))
+
+    def __len__(self):
+        return len(self._sequence)
+
+def as_mapping(seq):
+    return SequenceMapping(seq)
 
 class TrackedList(TrackedBase, MutableSequence):
     type_str: str = "list"
     operations: List[str] = ["set", "insert", "del"]
     wraps: Callable[[Type], float] = lambda t: 1.0 if issubclass(t, list) else 0.0
 
-    def __init__(self, value, wrapper: AutoWrapper = _default_auto_wrapper):
+    def __init__(self, value, wrapper: AutoWrapper = None):
+        if wrapper is None:
+            wrapper = _default_auto_wrapper
         super().__init__()
         self._wrapper = wrapper
         self._value: List[TrackedBase] = [
@@ -266,7 +308,7 @@ class TrackedList(TrackedBase, MutableSequence):
 
     @property
     def _childs(self) -> Mapping[Any, "TrackedBase"]:
-        return self._value
+        return as_mapping(self._value)
 
     @property
     def _additional_data(self) -> Any:
@@ -274,7 +316,7 @@ class TrackedList(TrackedBase, MutableSequence):
 
     @classmethod
     def _construct(cls, childs, additional_data) -> "TrackedBase":
-        return cls(childs)
+        return cls([childs[str(i)] for i in range(len(childs))])
 
     # --- list mutation operations ---
     def __setitem__(self, idx, v):
@@ -344,7 +386,7 @@ class LogDB:
     def __init__(self, path: Path, initial_value = None, trackers: Optional[Sequence[Type["TrackedBase"]]] = None):
         self.path = path
         if trackers is None:
-            trackers = [TrackedJsonFinalValue, TrackedDict]
+            trackers = [TrackedJsonFinalValue, TrackedDict, TrackedList]
         self._TRACKED_TYPES = {t.type_str:t for t in trackers}
 
         self._current = TrackedJsonFinalValue(None)
@@ -363,7 +405,9 @@ class LogDB:
     def _reconstruct_from_log(self):
         with self.path.open("r") as f:
             for l in f.readlines():
+                print(self._current)
                 load = json.loads(l)
+                print(load)
                 op, key, data = load["op"], load["key"], load["data"]
                 if key == [] and op =="reset_root":
                     self._current = _decode_tracker(data, self._tracked_types)
@@ -387,5 +431,3 @@ class LogDB:
         
 
 _default_auto_wrapper = AutoWrapper()
-
-
