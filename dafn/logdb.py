@@ -29,7 +29,7 @@ class AutoWrapper:
     _WRAP_RULES: List[tuple[Callable[[Type], float], Type["TrackedBase"]]]
     _CACHED_TYPE_MAPPING: Dict[Type, Type["TrackedBase"]]
 
-    def __init__(self, trackers: Sequence[Type["TrackedBase"]] | None = None):
+    def __init__(self, trackers: Optional[Sequence[Type["TrackedBase"]]] = None):
         if trackers is None:
             trackers = [TrackedJsonFinalValue, TrackedDict]
         self._TRACKED_TYPES = {t.type_str:t for t in trackers}
@@ -46,7 +46,6 @@ class AutoWrapper:
         v = self._CACHED_TYPE_MAPPING[t](v, self)
         return v
 
-_default_auto_wrapper = AutoWrapper()
 
 def mk_tracked(v, auto_wrapper: AutoWrapper | Literal["default", "final"] = "default") -> "TrackedBase":
     if auto_wrapper == "default":
@@ -342,7 +341,7 @@ class LogDB:
     def _tracked_types(self)-> Mapping[str, Type["TrackedBase"]]:
         return self ._TRACKED_TYPES
 
-    def __init__(self, path: Path, initial_value = None, trackers: Sequence[Type["TrackedBase"]] | None = None):
+    def __init__(self, path: Path, initial_value = None, trackers: Optional[Sequence[Type["TrackedBase"]]] = None):
         self.path = path
         if trackers is None:
             trackers = [TrackedJsonFinalValue, TrackedDict]
@@ -387,6 +386,6 @@ class LogDB:
         self._current = value
         
 
-
+_default_auto_wrapper = AutoWrapper()
 
 

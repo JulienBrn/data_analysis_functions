@@ -15,7 +15,7 @@ dependencies = [
     "xarray[io,accel]",
     "dask[complete]",
     "scipy",
-    "scikit-learn",   # sklearn should be scikit-learn
+    "scikit-learn",  
     "anyio[trio]",
     "pydantic[email,timezone]"
 ]
@@ -24,7 +24,6 @@ dependencies = [
 spike2 = ["sonpy"]
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = {"" = "."}
 
-[tool.setuptools.packages.find]
-where = ["src"]
+

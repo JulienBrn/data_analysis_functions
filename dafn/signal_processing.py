@@ -46,7 +46,7 @@ def compute_lfp(ar: xr.DataArray, lowpass_filter: LowpassFilter = LowpassFilter(
     distrust_time = lowpass_filter.get_distrust_time()
     low_filter = lowpass_filter.get_sos_filter(ar["t"].attrs["fs"])
 
-    def compute_lfp(a):
+    def compute_lfp(a: np.array):
         return scipy.signal.sosfiltfilt(low_filter, a)
     
     return _compute_signal_processing(ar, compute_lfp, out_freq, distrust_time)
@@ -81,7 +81,6 @@ def _compute_ffts_xr(
     nfft=None,
     detrend="constant",
     return_onesided=True,
-    
 ):
     if nfft is None:
         nfft = nperseg
