@@ -80,10 +80,7 @@ class LocalThreadScheduler(Scheduler):
 
     def __init__(self, cache_path: Path, max_runnables: int = 5):
         self.limiter = anyio.CapacityLimiter(max_runnables)
-        if cache_path.exists():
-            self.runnable_info: TrackedDict = LogDB(cache_path).load_from_log_file()
-        else:
-            self.runnable_info: TrackedDict = LogDB(cache_path).initialize({})
+        self.runnable_info: TrackedDict = LogDB(cache_path, initial_value={}).root
         for k, v in self.runnable_info.items():
             if "status" in v and v["status"] not in ["success", "cancelled", "error", "lost"]:
                 v["status"] = "lost"

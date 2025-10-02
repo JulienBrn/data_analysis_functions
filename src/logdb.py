@@ -1,198 +1,160 @@
-""" Module to define append only logs. No attempt at thread safety, we assume you are using async.
-For now, no snapshots, sessions, transactions, logging of event times, ...
+""" Module to define append only logs. No attempt at thread safety. Async support will be provided later.
+For now, no snapshots, sessions, transactions, logging of event times, ... 
 These features are planned, but lets get it working without them first.
 """
 
 from abc import abstractmethod
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type, Union, Callable
-from collections.abc import MutableMapping, MutableSequence
+from typing import Any, Dict, List, Optional, Type, Union, Callable, Sequence, Literal
+from collections.abc import MutableMapping, MutableSequence, Mapping
 import abc
+import jsonpatch
+from functools import cached_property
 
-# --- Registry state ---
-_TRACKED_TYPES: Dict[str, Type["TrackedBase"]] = {}
-_WRAP_RULES: List[tuple[Callable[[Type], float], Type["TrackedBase"]]] = []
-_CACHED_TYPE_MAPPING: Dict[Type, Type["TrackedBase"]] = {}
-_FIRST_WRAPPING = False
+def _encode_tracker(tracker: "TrackedBase"):
+    return (tracker.type_str, {k:_encode_tracker(c) for k,c in tracker._childs.items()}, tracker._additional_data)
 
-
-# --- Registry decorator ---
-def tracked_type(type_name: str, can_wrap: Callable[[Type], float]):
-    """
-    Class decorator for registering tracked types.
-
-    Args:
-        type_name: string identifier (e.g., "dict", "list", "final").
-        can_wrap: function that takes a Python type and returns a float priority
-                  (0.0 = cannot wrap, higher = better match).
-    """
-    def decorator(cls):
-        if _FIRST_WRAPPING:
-            raise Exception(
-                "Some objects have already been wrapped, cannot update wrapping rules"
-            )
-        cls.type_str = type_name
-        _TRACKED_TYPES[type_name] = cls
-        _WRAP_RULES.append((can_wrap, cls))
-        return cls
-    return decorator
+def _decode_tracker(data, _tracked_types: Mapping[str, Type["TrackedBase"]]) -> "TrackedBase":
+    t, c, a = data
+    cls = _tracked_types[t]
+    childs = {k: _decode_tracker(v, _tracked_types) for k,v in c.items()}
+    r = cls._construct(childs, a)
+    for c in r._childs.values():
+        c._set_parent(r)
+    return r
 
 
-def wrap_value(value: Any, file_path: Path, key: List[Union[str, int]]) -> "TrackedBase":
-    """Wrap a value into the correct Tracked subclass according to registry."""
-    if isinstance(value, TrackedBase):
-        return value
-    t = type(value)
-    if t not in _CACHED_TYPE_MAPPING:
-        global _FIRST_WRAPPING
-        _FIRST_WRAPPING = True
-        best_priority = 0.0
-        best_cls: Optional[Type[TrackedBase]] = None
-        for rule, cls in _WRAP_RULES:
-            score = rule(t)
-            if score > best_priority:
-                best_priority = score
-                best_cls = cls
-        if best_cls is None:
-            raise ValueError(
-                f"No tracked type registered for {t}. Registered: {list(_TRACKED_TYPES.keys())}"
-            )
-        _CACHED_TYPE_MAPPING[t] = best_cls
-    return _CACHED_TYPE_MAPPING[t].wrap(value, file_path, key)
+class AutoWrapper:
+    _WRAP_RULES: List[tuple[Callable[[Type], float], Type["TrackedBase"]]]
+    _CACHED_TYPE_MAPPING: Dict[Type, Type["TrackedBase"]]
 
-def decode_value(encoded: dict, file_path: Path, key: list[Union[str, int]]) -> "TrackedBase":
-    handler = encoded["handler"]
-    cls = _TRACKED_TYPES.get(handler)
-    if cls is None:
-        raise ValueError(f"No tracked type registered for handler={handler}")
+    def __init__(self, trackers: Sequence[Type["TrackedBase"]] | None = None):
+        if trackers is None:
+            trackers = [TrackedJsonFinalValue, TrackedDict]
+        self._TRACKED_TYPES = {t.type_str:t for t in trackers}
+        self._WRAP_RULES = [(t.wraps, t) for t in trackers]
+        self._CACHED_TYPE_MAPPING = {}
 
-    value = encoded["value"]
-    return cls(cls.decode(value), file_path, key)
+    def _create(self, v) -> "TrackedBase":
+        if isinstance(v, TrackedBase):
+            return v
+        t = type(v)
+        if t not in self._CACHED_TYPE_MAPPING:
+            _, cls = max(self._WRAP_RULES, key=lambda rule: rule[0](t))
+            self._CACHED_TYPE_MAPPING[t] = cls
+        v = self._CACHED_TYPE_MAPPING[t](v, self)
+        return v
+
+_default_auto_wrapper = AutoWrapper()
+
+def mk_tracked(v, auto_wrapper: AutoWrapper | Literal["default", "final"] = "default") -> "TrackedBase":
+    if auto_wrapper == "default":
+        auto_wrapper = _default_auto_wrapper
+    elif auto_wrapper =="final":
+        return TrackedJsonFinalValue(v)
+    return auto_wrapper._create(v)
+
+
 
 # --- Base class ---
 class TrackedBase(abc.ABC):
     """Base class for tracked dict/list/final with logging support."""
 
-    type_str: str  # each subclass sets this via decorator
-    _value: Any #Init method should allow construct
+    # each subclass sets these values
+    type_str: str  
+    wraps: Callable[[Type], float]
+    operations: List[str] 
 
-    def __init__(self, value, file_path: Path, key: List[Union[str, int]]):
-        self._file_path = file_path
-        self._key = key or []
-        self._value = value
-
-    def _log_op(self, op: str, data: Any):
-        event = dict(op=op, key=self._key, data=data)
-        with self._file_path.open("a") as f:
-            f.write(json.dumps(event) + "\n")
-
-    @classmethod
-    def wrap(cls, value: Any, file_path: Path, key: List[Union[str, int]]):
-        return cls(value, file_path, key)
+    #values for each instance
+    _parent: "TrackedBase" | None
+    _parent_key: Any | None
     
-    @abstractmethod
-    def _apply_event(self, op: str, data: Any):
-        """Apply a log event to this tracked object (in-place)."""
-        ...
-
-    def apply_event(self, event):
-        """Apply a log event to this tracked object (in-place)."""
-        op, key, data = event["op"], event["key"], event["data"]
-        if key == []:
-            self._apply_event(op, data)
+    @cached_property
+    def _root_db(self) -> "LogDB" | None:
+        curr = self
+        while curr._parent is not None:
+            curr = curr._parent
+        if hasattr(curr, "_root_db_handler"):
+            return curr._root_db_handler
         else:
-            self[key[0]].apply_event(dict(op=op, key=key[1:], data=data))
+            return None
+    
+    @cached_property
+    def _root_path(self):
+        keys = []
+        curr = self
+        while curr._parent is not None:
+            keys.append(curr._parent_key)
+            curr = curr._parent
+        return keys[::-1]
 
+    def _set_parent(self, parent: "TrackedBase", key) -> "TrackedBase":
+        if self._parent is not None:
+            raise Exception("Objects can not change trees for now")
+        self._parent = parent
+        self._parent_key = key
+        del self._root_db
+        del self._root_path
+        return self
+    
+    def __init__(self):
+        self._parent = None
+        self._parent_key = None
+
+    @property
     @abstractmethod
-    def get_model(self):
-        """Return unwrapped Python object. Should know how to recursively remove wrapped values from _value"""
-        ...
+    def _childs(self) -> Mapping[Any, "TrackedBase"]: ...
 
+    @property
     @abstractmethod
-    def encode(self): 
-        ...
-
-    @abstractmethod
-    @classmethod
-    def decode(cls, value): 
-        ...
-
-
-
-# --- Final (scalar) ---
-@tracked_type("final", can_wrap=lambda t: 0.1)
-class TrackedFinalValue(TrackedBase):
-    def __init__(self, value: Any, file_path: Path, key: List[Union[str, int]]):
-        super().__init__(value, file_path, key)
-
-    def get_model(self):
-        return self._value
-
-    def encode(self):
-        return dict(handler=self.type_str, value=self._value)
-    
-    def _apply_event(self, op, data):
-        raise ValueError(f"Final values do not support events: {op}")
-    
-    @classmethod
-    def decode(cls, value): 
-        return value
-    
-# --- Final (scalar) ---
-@tracked_type("root", can_wrap=lambda t: 0.0)
-class TrackedRoot(TrackedBase):
-    def __init__(self, value: Any, file_path: Path):
-        super().__init__(wrap_value(value, file_path, [None]), file_path, [])
-        self._log_op("create_root", self._value.encode())
-
-    def get_model(self):
-        return self._value
-
-    def encode(self):
-        return dict(handler=self.type_str, value=self._value)
-    
-    @staticmethod
-    def from_initial_ev(ev, file_path):
-        if ev["op"] != "create_root":
-            raise Exception("Not create root event")
-        return TrackedRoot(ev["data"], file_path)
-    
-    def _apply_event(self, op, data):
-        raise ValueError(f"Root do not have events")
+    def _additional_data(self) -> Any: ...
     
     @classmethod
-    def decode(cls, value): 
-        return decode_value(value)
-    
-    def __getitem__(self, item):
-        if item is not None:
-            raise Exception("Root item should be None")
-        return self._value
+    @abstractmethod
+    def _construct(cls, childs, additional_data) -> "TrackedBase": ...
 
-# --- Dict ---
-@tracked_type("dict", can_wrap=lambda t: 10.0 if issubclass(t, dict) else 0.0)
+    def _logev(self, ev, data):
+        if self._root_db is None:
+            raise Exception("Objects need to be tracked to have events")
+        self._root_db._log_op(ev, self._root_path, data)
+
+    @abstractmethod
+    def _apply_reconstruct_op(self, op, data) -> None: ...
+
+    
+
 class TrackedDict(TrackedBase, MutableMapping):
-    _value: Dict[Any, TrackedBase]
+    type_str: str = "dict"
+    operations: List[str] = ["set"]
+    wraps: Callable[[Type], float] = lambda t: 1.0 if issubclass(t, dict) else 0.0
 
-    def __init__(self, value: dict, file_path: Path, key: List[Union[str, int]]):
-        value = {k: wrap_value(v, file_path, key + [k]) for k, v in value.items()}
-        super().__init__(value, file_path, key)
-
-    def __getitem__(self, k):
-        return self._value[k]
-
-    def __setitem__(self, k, v):
-        wrapped = wrap_value(v, self._file_path, self._key + [k])
-        if k in self._value:
-            self._log_op("replace", dict(key=k, value=wrapped.encode()))
-        else:
-            self._log_op("insert", dict(key=k, value=wrapped.encode()))
-        self._value[k] = wrapped
+    def __init__(self, value, wrapper: AutoWrapper = _default_auto_wrapper):
+        super().__init__()
+        self._value = {k: wrapper._create(v)._set_parent(self, k) for k,v in value.items()}
         
-
+    
+    @property
+    def _childs(self) -> Mapping[Any, "TrackedBase"] | Sequence["TrackedBase"]: 
+        return self._value
+    
+    def __setitem__(self, k, v):
+        v = mk_tracked(v)._set_parent(self, k)
+        self._logev("set", (k, _encode_tracker(v)))
+        self._value[k] = v
+        
+    @property
+    def _additional_data(self) -> Any:
+        return None
+    
+    @classmethod
+    def _construct(cls, childs, additional_data) -> "TrackedBase": 
+        return cls(childs)
+    
     def __delitem__(self, k):
-        self._log_op("del", dict(key=k))
+        if k not in self._value:
+            raise KeyError(k)
+        self._logev("del", k)
         del self._value[k]
 
     def __iter__(self):
@@ -201,45 +163,230 @@ class TrackedDict(TrackedBase, MutableMapping):
     def __len__(self):
         return len(self._value)
 
-    def get_model(self):
-        return {k: v.get_model() for k, v in self._value.items()}
+    # --- replay from log ---
+    def _apply_reconstruct_op(self, op, data) -> None:
+        if op == "set":
+            (k, v) = data
+            val = _decode_tracker(v, self._root_db._tracked_types)
+            val._set_parent(self, k)
+            self._value[k] = val
+        elif op == "del":
+            k = data
+            if k in self._value:
+                del self._value[k]
+        else:
+            raise Exception(f"Unknown operation {op}")
+
+class TrackedFinalValueBase(TrackedBase):
+
     
-    def encode(self):
-        return dict(handler=self.type_str, value={k: v.encode() for k, v in self._value.items()})
+    operations: List[str] = ["patch"]
     
-    def _apply_event(self, op, data): 
-        if op =="replace":
-            self._value[data["key"]] = decode_value(data["value"])
-        if op =="insert":
-            self._value[data["key"]] = decode_value(data["value"])
-        if op =="del":
-            del self._value[data["key"]]
+
+    def __init__(self, value):
+        super().__init__()
+        self._value = value
+    
+    @property
+    def value(self) -> Any:
+        return self._load_value(self._dump_value())
+    
+    @property
+    def _childs(self) -> Mapping[Any, "TrackedBase"]: 
+        return {}
+    
+    def _apply_reconstruct_op(self, op, data):
+        if op=="patch":
+            self._value = self._load_value(self._apply_patch(self._dump_value(), data))
+        else:
+            raise Exception("Unknown operation")
+
+    def __enter__(self):
+        self.old_json = self._dump_value()
+        return self._value
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._logev("patch", self._encode_patch(self.old_json, self._dump_value()))
+    
+    @property
+    def _additional_data(self) -> Any:
+        return self._dump_value()
+    
+    @classmethod
+    def _construct(cls, childs, additional_data) -> "TrackedBase": 
+        return cls(cls._load_value(additional_data))
+
+    @abstractmethod
+    def _dump_value(self) -> str: ...
+    
+    @abstractmethod
+    @classmethod
+    def _load_value(cls, s: str) -> Any: ...
+    
+    @abstractmethod
+    @classmethod
+    def _encode_patch(cls, old_value, new_value) -> Any: ...
+    
+    @abstractmethod
+    @classmethod
+    def _apply_patch(cls, old_value, patch) -> Any: ...
+
+class TrackedJsonFinalValue(TrackedFinalValueBase):
+    type_str: str = "json_value"
+    wraps: Callable[[Type], float] = lambda t: 0.1
+
+    def _dump_value(self) -> str: 
+        return json.dumps(self._value)
+    
+    @classmethod
+    def _load_value(cls, s: str) -> Any: 
+        return json.loads(s)
+    
+    @classmethod
+    def _encode_patch(cls, old_value, new_value) -> Any: 
+        patch = jsonpatch.make_patch(old_value, new_value)
+        return patch.to_string()
+    
+    @classmethod
+    def _apply_patch(cls, old_value, patch) -> Any: 
+        patch = jsonpatch.JsonPatch.from_string(patch)
+        return patch.apply(old_value)
+
+
+class TrackedList(TrackedBase, MutableSequence):
+    type_str: str = "list"
+    operations: List[str] = ["set", "insert", "del"]
+    wraps: Callable[[Type], float] = lambda t: 1.0 if issubclass(t, list) else 0.0
+
+    def __init__(self, value, wrapper: AutoWrapper = _default_auto_wrapper):
+        super().__init__()
+        self._wrapper = wrapper
+        self._value: List[TrackedBase] = [
+            wrapper._create(v)._set_parent(self, i) for i, v in enumerate(value)
+        ]
+
+    @property
+    def _childs(self) -> Mapping[Any, "TrackedBase"]:
+        return self._value
+
+    @property
+    def _additional_data(self) -> Any:
+        return None
 
     @classmethod
-    def decode(cls, value): 
-        return {k: decode_value(v) for k,v in value.items()}
-    
-# --- LogDB ---
+    def _construct(cls, childs, additional_data) -> "TrackedBase":
+        return cls(childs)
+
+    # --- list mutation operations ---
+    def __setitem__(self, idx, v):
+        v = mk_tracked(v)._set_parent(self, idx)
+        self._logev("set", (idx, _encode_tracker(v)))
+        self._value[idx] = v
+
+    def __getitem__(self, idx):
+        return self._value[idx]
+
+    def __delitem__(self, idx):
+        self._logev("del", idx)
+        del self._value[idx]
+        # reindex children
+        for i in range(idx, len(self._value)):
+            self._value[i]._parent_key = i
+
+    def insert(self, idx, v):
+        v = mk_tracked(v)._set_parent(self, idx)
+        self._logev("insert", (idx, _encode_tracker(v)))
+        self._value.insert(idx, v)
+        # reindex children
+        for i in range(idx, len(self._value)):
+            self._value[i]._parent_key = i
+
+    def __len__(self):
+        return len(self._value)
+
+    # --- replaying from log ---
+    def _apply_reconstruct_op(self, op, data) -> None:
+        if op == "set":
+            idx, v = data
+            val = _decode_tracker(v, self._root_db._tracked_types)
+            val._set_parent(self, idx)
+            self._value[idx] = val
+        elif op == "insert":
+            idx, v = data
+            val = _decode_tracker(v, self._root_db._tracked_types)
+            val._set_parent(self, idx)
+            self._value.insert(idx, val)
+            for i in range(idx, len(self._value)):
+                self._value[i]._parent_key = i
+        elif op == "del":
+            idx = data
+            del self._value[idx]
+            for i in range(idx, len(self._value)):
+                self._value[i]._parent_key = i
+        else:
+            raise Exception(f"Unknown operation {op}")
+
 class LogDB:
-    def __init__(self, path: Path):
+    path: Path
+
+    _TRACKED_TYPES: Dict[str, Type["TrackedBase"]]
+    _current: TrackedBase
+
+
+    def _log_op(self, ev, keys, data):
+        with self.path.open("a") as f:
+            json.dump(dict(op=ev, key=keys, data=data), f)
+            f.write("\n")
+
+    @property
+    def _tracked_types(self)-> Mapping[str, Type["TrackedBase"]]:
+        return self ._TRACKED_TYPES
+
+    def __init__(self, path: Path, initial_value = None, trackers: Sequence[Type["TrackedBase"]] | None = None):
         self.path = path
+        if trackers is None:
+            trackers = [TrackedJsonFinalValue, TrackedDict]
+        self._TRACKED_TYPES = {t.type_str:t for t in trackers}
 
-    def initialize(self, initial_value: Any) -> TrackedBase:
+        self._current = TrackedJsonFinalValue(None)
+        self._current._root_db_handler = self
+
         if self.path.exists():
-            raise Exception("Expecting non existent path")
-        self.path.touch()
-        root = TrackedRoot(initial_value, self.path)
-        return root._value
+            self._reconstruct_from_log()
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.touch()
+            if initial_value is not None:
+                self.root = initial_value
+            
+            
 
-    def load_from_log_file(self) -> TrackedRoot:
-        if not self.path.exists():
-            raise Exception("Log file missing")
-
+    def _reconstruct_from_log(self):
         with self.path.open("r") as f:
-            create_root_ev = json.loads(f.readline())
-            root = TrackedRoot.from_initial_ev(create_root_ev, self.path)
-            for line in f.readlines():
-                event = json.loads(line)
-                root.apply_event(event)
+            for l in f.readlines():
+                load = json.loads(l)
+                op, key, data = load["op"], load["key"], load["data"]
+                if key == [] and op =="reset_root":
+                    self._current = _decode_tracker(data, self._tracked_types)
+                    self._current._root_db_handler = self
+                else:
+                    child_tracker = self._current
+                    for k in key:
+                        child_tracker = child_tracker._childs[k]
+                    child_tracker._apply_reconstruct_op(op, data)
+    
+    @property 
+    def root(self):
+        return self._current
+    
+    @root.setter
+    def root(self, value):
+        value =  mk_tracked(value)
+        value._root_db_handler = self
+        value._logev("reset_root", _encode_tracker(value))
+        self._current = value
+        
 
-        return root._value
+
+
+

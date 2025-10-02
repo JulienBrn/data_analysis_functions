@@ -7,6 +7,7 @@ from abc import abstractmethod
 from pydantic import BaseModel
 import dask.array as da
 
+
 class Checkpoint(abc.ABC):
 
     @abstractmethod
@@ -16,10 +17,18 @@ class Checkpoint(abc.ABC):
     async def await_computed(self) -> None: ...
 
 
-
-class XarrayCheckpoint(Checkpoint, BaseModel):
+class BasicCheckpoint(Checkpoint):
     path: Path
     scheduler: Scheduler
+    f: Callable[[], Any]
+
+    @abstractmethod
+    def load(self) -> Any:...
+
+    @abstractmethod
+    async def await_computed(self) -> None: ...
+
+class XarrayCheckpoint(BasicCheckpoint, BaseModel):
     f: Callable[[], xr.DataArray | xr.Dataset]
 
     def load(self) -> Any: 
@@ -51,4 +60,7 @@ class XarrayCheckpoint(Checkpoint, BaseModel):
             obj.to_zarr(tmp_path, compute=True)
         self.task = await self.scheduler.submit_runnable(PythonFctRunnable(task_func, [], {}))
         tmp_path.rename(self.path)
+        async for t in self.task.statuses():
+            
         await self.task.wait()
+
