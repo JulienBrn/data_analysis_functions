@@ -6,13 +6,21 @@ These features are planned, but lets get it working without them first.
 from abc import abstractmethod
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type, Union, Callable, Sequence, Literal
+from typing import Any, Dict, List, Optional, Type, Union, Callable, Sequence, Literal, Protocol
 from collections.abc import MutableMapping, MutableSequence, Mapping
 import abc
 
 from attrs import has
 import jsonpatch
 from functools import cached_property
+
+#Actually, this should be rewritten differently:
+#Separate serialization/load of tracked values -> id
+#Serialization of operations on these tracked values. 
+#Always keep in memory a map : id -> current_value_held_by_id
+#Always keep in memory a map : id -> path_to_that_id
+#Always keep in memory a map : path -> id
+#Only expose handlers that store its id and simply maps any operation to its current value
 
 def _encode_tracker(tracker: "TrackedBase"):
     return (tracker.type_str, {k:_encode_tracker(c) for k,c in tracker._childs.items()}, tracker._additional_data)
@@ -72,7 +80,7 @@ class TrackedBase(abc.ABC):
     _parent_key: Optional[Any]
     
     @cached_property
-    def _root_db(self) -> Optional["LogDB"]:
+    def _root_db(self) -> Optional["LogDB"]: #The cached properties are not updated properly on parent change...
         curr = self
         while curr._parent is not None:
             curr = curr._parent
@@ -127,11 +135,11 @@ class TrackedBase(abc.ABC):
 
     def __str__(self):
         if hasattr(self, "_value"):
-            return "Tracked_"+self.type_str+"("+self._value.__str__()+")"
+            return self._value.__str__()
         
     def __repr__(self):
         if hasattr(self, "_value"):
-            return "Tracked_"+self.type_str+"("+self._value.__repr__()+")"
+            return self._value.__repr__()
 
 class TrackedDict(TrackedBase, MutableMapping):
     type_str: str = "dict"
@@ -406,9 +414,9 @@ class LogDB:
     def _reconstruct_from_log(self):
         with self.path.open("r") as f:
             for l in f.readlines():
-                print(self._current)
+                # print(self._current)
                 load = json.loads(l)
-                print(load)
+                # print(load)
                 op, key, data = load["op"], load["key"], load["data"]
                 if key == [] and op =="reset_root":
                     self._current = _decode_tracker(data, self._tracked_types)

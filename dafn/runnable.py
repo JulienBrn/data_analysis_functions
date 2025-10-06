@@ -5,32 +5,36 @@ import logging
 import functools
 import anyio
 import anyio.to_thread
-from typing import Any, List, AsyncGenerator
+from typing import Any, List, AsyncGenerator, Protocol, ClassVar, Callable
 from pathlib import Path
 from pydantic import BaseModel
-from utilities import create_broadcast_log, BroadcastReceiveLog, BroadcastSendLog
-from logdb import LogDB, TrackedDict
+from .utilities import create_broadcast_log, BroadcastReceiveLog, BroadcastSendLog
+from .logdb import LogDB, TrackedDict
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
 
-class Runnable(abc.ABC):
-    runnable_type: str
+_curr_process_start_time = time.time()
 
 
-class PythonFctRunnable(Runnable, BaseModel):
-    runnable_type = "python_func"
+class Runnable(Protocol):
+    runnable_type: ClassVar[str]
+
+
+class PythonFctRunnable(BaseModel):
+    runnable_type: ClassVar[str] = "python_func"
     func: Any
-    args: List[Any]
-    kwargs: dict[str, Any]
+    args: List[Any] = []
+    kwargs: dict[str, Any] = {}
 
 
-class DaskRunnable(Runnable, BaseModel):
-    runnable_type = "dask_delayed"
+class DaskRunnable(BaseModel):
+    runnable_type: ClassVar[str] = "dask_delayed"
     nodes: List[Any]  # replace Any with dask.delayed.Delayed if you want
 
 
-class Task(abc.ABC):
+class Task(Protocol):
     @abc.abstractmethod
     async def wait(self) -> None: ...
 
@@ -42,10 +46,13 @@ class Task(abc.ABC):
     async def get_run_metadata(self) -> Any: ...
 
     @abc.abstractmethod
-    async def statuses(self) -> AsyncGenerator[str, None]: ...
+    def statuses(self) -> AsyncGenerator[str, None]: ...
+
+    @abc.abstractmethod
+    async def result(self) -> Any: ...
 
 
-class Scheduler(abc.ABC):
+class Scheduler(Protocol):
 
     @property
     @abc.abstractmethod
@@ -60,13 +67,17 @@ class Scheduler(abc.ABC):
 
 class LocalThreadScheduler(Scheduler):
 
-    class LocalTask(Task, BaseModel):
-        id: uuid.UUID
+    class LocalTask:
+        id: str
         scheduler: "LocalThreadScheduler"
 
         # these are injected by scheduler at creation
         _done_event: anyio.Event
-        _status_recv: BroadcastReceiveLog
+        _status_recv: Callable[[], BroadcastReceiveLog]
+
+        def __init__(self, id, scheduler, _done_event, _status_recv, _result_pointer):
+            self.id, self.scheduler, self._done_event, self._status_recv, self.result = id, scheduler, _done_event, _status_recv, _result_pointer
+        
 
         async def wait(self) -> None:
             await self._done_event.wait()
@@ -78,20 +89,25 @@ class LocalThreadScheduler(Scheduler):
             async for status in self._status_recv():
                 yield status
 
+        async def result(self) -> Any:
+            await self.wait()
+            if len(self._result) ==0:
+                raise Exception("No result")
+            return self._result[0]
+
     def __init__(self, cache_path: Path, max_runnables: int = 5):
         self.limiter = anyio.CapacityLimiter(max_runnables)
         self.runnable_info: TrackedDict = LogDB(cache_path, initial_value={}).root
         for k, v in self.runnable_info.items():
-            if "status" in v and v["status"] not in ["success", "cancelled", "error", "lost"]:
+            if v.get("status", "na")._value not in ["success", "cancelled", "error", "lost"]:
+                print(v["status"])
                 v["status"] = "lost"
 
-    async def __aenter__(self):
-        self._tg_cm = anyio.create_task_group()
-        self.tg = await self._tg_cm.__aenter__()
-        return self
-
-    async def __aexit__(self, *exc):
-        await self._tg_cm.__aexit__(*exc)
+    @asynccontextmanager
+    async def start(self):
+        async with anyio.create_task_group() as tg:
+            self.tg = tg
+            yield self
 
     @property
     def supported_runnable_types(self) -> List[str]:
@@ -106,23 +122,29 @@ class LocalThreadScheduler(Scheduler):
         else:
             raise ValueError(f"Unsupported runnable type: {runnable.runnable_type}")
 
-        runnable_id = uuid.uuid4()
-        self.runnable_info[runnable_id] = dict(status="submitted")
+        runnable_id = str(uuid.uuid4())
 
         # lifecycle signaling
         send_stream, recv_stream_factory = create_broadcast_log()
         done_event = anyio.Event()
+        self.runnable_info[runnable_id] = dict(status="submitted", process=_curr_process_start_time)
+        send_stream.send_nowait("submitted")
+        result = []
 
-        await self.tg.start(self._run_func, func, runnable_id, send_stream, done_event)
+        async def _run_runnable():
+            return await self._run_func(func, runnable_id, send_stream, done_event, result)
 
+        self.tg.start_soon(_run_runnable)
+        
         return self.LocalTask(
             id=runnable_id,
             scheduler=self,
             _done_event=done_event,
             _status_recv=recv_stream_factory,
+            _result_pointer=result
         )
 
-    async def _run_func(self, func, runnable_id, status_send: BroadcastSendLog, done_event: anyio.Event):
+    async def _run_func(self, func, runnable_id, status_send: BroadcastSendLog, done_event: anyio.Event, result_dest):
         async with status_send, self.limiter:
             def update_status(new_status: str):
                 self.runnable_info[runnable_id]["status"] = new_status
@@ -132,7 +154,9 @@ class LocalThreadScheduler(Scheduler):
             self.runnable_info[runnable_id]["start_time"] = time.time()
 
             try:
-                await anyio.to_thread.run_sync(func)
+                res = await anyio.to_thread.run_sync(func)
+                result_dest.append(res)
+                self.runnable_info[runnable_id]["result"] = res
                 update_status("success")
             except (anyio.get_cancelled_exc_class(), KeyboardInterrupt):
                 update_status("cancelled")
@@ -145,3 +169,6 @@ class LocalThreadScheduler(Scheduler):
 
     async def get_runnable_info(self, id: uuid.UUID) -> Any:
         return self.runnable_info[id]
+    
+    async def task_from_id(self, id: uuid.UUID) -> Task: 
+        return self.LocalTask(id=id, scheduler=self, _done_event=None, _status_recv = None, _result_pointer=[]) #need to change result_pointer

@@ -59,7 +59,10 @@ def compute_bua(ar: xr.DataArray, bandpass_filter: BandpassFilter = BandpassFilt
     low_filter = lowpass_filter.get_sos_filter(ar["t"].attrs["fs"])
 
     def compute_bua(a):
-        return scipy.signal.sosfiltfilt(low_filter, np.abs(scipy.signal.sosfiltfilt(band_filter, a)))
+        bandpassed = scipy.signal.sosfiltfilt(band_filter, a)
+        rectified = np.abs(bandpassed)
+        lowpassed = scipy.signal.sosfiltfilt(low_filter, rectified)
+        return lowpassed
     
     return _compute_signal_processing(ar, compute_bua, out_freq, distrust_time)
 
