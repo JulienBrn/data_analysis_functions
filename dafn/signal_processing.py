@@ -151,7 +151,13 @@ def compute_scaled_fft(
 
 
 def compute_psd_from_scaled_fft(ffts: xr.DataArray, time_dim: str = "t", channel_dim="channel", channel_dim_suffix="_2") -> xr.DataArray:
-    return (ffts*np.conj(ffts.rename({channel_dim: channel_dim+channel_dim_suffix}))).mean(dim="t")
+    res = (ffts*np.conj(ffts.rename({channel_dim: channel_dim+channel_dim_suffix}))).mean(dim="t")
+    try:
+        if np.prod(res.data.chunksize) > 10**8:
+            raise Exception(f"Huge chunk ! {res.data.chunksize} {ffts.data.chunksize}")
+    except Exception:
+        raise Exception(f"Unknown chunk !\n{res}\n{ffts}")
+    return res
     
 
 def compute_coh_from_psd(psd: xr.DataArray, channel_dim="channel", channel2_dim="channel_2") -> xr.Dataset:

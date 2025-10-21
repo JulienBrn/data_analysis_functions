@@ -124,7 +124,6 @@ class LocalThreadScheduler(Scheduler):
 
         runnable_id = str(uuid.uuid4())
 
-        # lifecycle signaling
         send_stream, recv_stream_factory = create_broadcast_log()
         done_event = anyio.Event()
         self.runnable_info[runnable_id] = dict(status="submitted", process=_curr_process_start_time)

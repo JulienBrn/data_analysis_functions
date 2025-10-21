@@ -44,20 +44,21 @@ def smrxchanneldata(smrx_path: Path) -> pd.DataFrame:
     return pd.DataFrame(spike2channels, columns=["chan_name", "chan_type", "physical_channel", "chan_num", "fs", "start_t", "end_t"])
 
 
-@contextmanager
-def smrxadc2electrophy(smrx_path: Path, channel_nums: List[Union[int, Any]] = [...]) -> Iterator[xr.DataArray]:
+def smrxadc2electrophy(smrx_path: Path, channel_nums: List[Union[int, Any]] = [...]) -> xr.DataArray:
     channel_metadata = smrxchanneldata(smrx_path)
     if ... in channel_nums:
         channel_nums = [c for c in channel_metadata["chan_num"].loc[(channel_metadata["chan_type"] == "Adc")].tolist() if not c in channel_nums]
     channel_metadata = channel_metadata.loc[channel_metadata["chan_num"].isin(channel_nums)]
     if channel_metadata.empty:
-        a= xr.DataArray(np.zeros((0, 0), dtype=float), dims=["channel", "t"], name="data")
-        a["t"] = xr.DataArray(np.zeros((0), dtype=float), dims=["t"])
-        a["t"].attrs["fs"] = 1000
-        a["channel"] = xr.DataArray(np.full((0), 0, dtype=int), dims=["channel"])
-        # a["chan_name"] = xr.DataArray(np.full((0), "chan", dtype=str), dims=["channel"])
-        yield a
-        return 
+        print(channel_nums)
+        raise Exception("Problem")
+        # a= xr.DataArray(np.zeros((0, 0), dtype=float), dims=["channel", "t"], name="data")
+        # a["t"] = xr.DataArray(np.zeros((0), dtype=float), dims=["t"])
+        # a["t"].attrs["fs"] = 1000
+        # a["channel"] = xr.DataArray(np.full((0), 0, dtype=int), dims=["channel"])
+        # # a["chan_name"] = xr.DataArray(np.full((0), "chan", dtype=str), dims=["channel"])
+        # return a
+        # return 
     if ("Adc" != channel_metadata["chan_type"]).any():
         raise Exception("Not all channels are Adc")
     fs, start_t, end_t = channel_metadata["fs"].iat[0], channel_metadata["start_t"].max(), channel_metadata["end_t"].min()
@@ -68,7 +69,9 @@ def smrxadc2electrophy(smrx_path: Path, channel_nums: List[Union[int, Any]] = [.
     with sonfile(smrx_path) as rec:
         time_base = rec.GetTimeBase()
         divide = int(np.round(1/(fs * time_base)))
-        def retrieve_data(slices: List[slice]):
+
+    def retrieve_data(slices: List[slice]):
+        with sonfile(smrx_path) as rec:
             channel_slice, time_slice = slices
             time_size = time_slice.stop-time_slice.start
             res = []
@@ -83,12 +86,12 @@ def smrxadc2electrophy(smrx_path: Path, channel_nums: List[Union[int, Any]] = [.
             res = np.stack(res, axis=0)
             return res
         
-        a = xr.DataArray(dask_array_from_chunk_function(retrieve_data, (len(channel_nums), n_elems), (1, 10**7), float), dims=["channel", "t"], name="data")
-        a["t"] = np.arange(n_elems)/fs + start_t
-        a["t"].attrs["fs"] = fs
-        a["channel"] = channel_metadata["chan_num"]
-        # a["chan_name"] = xr.DataArray(channel_metadata["chan_name"].to_numpy(), dims=["channel"])
-        yield a
+    a = xr.DataArray(dask_array_from_chunk_function(retrieve_data, (len(channel_nums), n_elems), (1, 10**7), float), dims=["channel", "t"], name="data")
+    a["t"] = np.arange(n_elems)/fs + start_t
+    a["t"].attrs["fs"] = fs
+    a["channel"] = channel_metadata["chan_num"]
+    # a["chan_name"] = xr.DataArray(channel_metadata["chan_name"].to_numpy(), dims=["channel"])
+    return a
 
 
     
