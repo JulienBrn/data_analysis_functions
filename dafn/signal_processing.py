@@ -287,8 +287,10 @@ def compute_csd_from_scaled_fft(
         mask = xr.ones_like(ffts1[channel1_dim], dtype=bool)*xr.ones_like(ffts2[channel2_dim], dtype=bool)
     elif pairs == "diag":
         mask = ffts1[channel1_dim] == ffts2[channel2_dim]
-    else:
+    elif callable(pairs):
         mask = pairs(ffts1[channel1_dim], ffts2[channel2_dim])
+    else:
+        raise ValueError("Wrong pair argument")
     mask = mask.drop_vars(mask.coords.keys())
     if keep_coords is None:
         rm_coords = []
@@ -321,7 +323,7 @@ def compute_csd_from_scaled_fft(
         res = (ffts1 * np.conj(ffts2)).mean(time_dim)
         res: xr.DataArray = res.drop_vars(["__chan_1_index", "__chan_2_index"])
     else:
-        raise Exception("Wrong result_type option")
+        raise ValueError("Wrong result_type option")
     if created_chan_coord:
         res = res.drop_vars([channel1_dim, channel2_dim], errors="ignore")
     return res
@@ -344,6 +346,22 @@ def compute_coh_from_psd(psd: xr.DataArray, channel_dim="channel", channel2_dim=
 #     return res
 
 def compute_welch_from_psd(psd: xr.DataArray, channel_dim="channel", channel2_dim="channel_2") -> xr.DataArray:
+    if (psd[channel_dim].to_numpy() != psd[channel2_dim].to_numpy()).any():
+        raise Exception("Problem")
+    welch = xr.apply_ufunc(lambda x: da.diagonal(x, axis1=-2, axis2=-1), psd, input_core_dims=[[channel_dim, channel2_dim]], output_core_dims=[[channel_dim]], dask="allowed")
+    return np.real(welch)
+
+def compute_welch_from_csd(csd: xr.DataArray, channel1_coord="channel", channel2_coord=None) -> xr.DataArray:
+    if channel2_coord is None:
+        channel2_coord = channel1_coord
+    if csd[channel1_coord].ndim != 1 or csd[channel2_coord].ndim:
+        raise ValueError("Channel coords should be 1 dimensional")
+    if csd[channel1_coord].dims == csd[channel2_coord].dims:
+        
+        return np.real(csd.isel({csd[channel1_coord].dims[0]: csd[channel1_coord] == csd[channel2_coord]}))
+    else:
+        index = (channel1_coord == channel2_coord).stack(channel=(channel1_coord.dims[0], channel2_coord.dims[0]), create_index=False)
+        index = index.where(index, drop=True)
     if (psd[channel_dim].to_numpy() != psd[channel2_dim].to_numpy()).any():
         raise Exception("Problem")
     welch = xr.apply_ufunc(lambda x: da.diagonal(x, axis1=-2, axis2=-1), psd, input_core_dims=[[channel_dim, channel2_dim]], output_core_dims=[[channel_dim]], dask="allowed")
