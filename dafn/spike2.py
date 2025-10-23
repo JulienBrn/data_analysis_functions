@@ -89,7 +89,7 @@ def smrxadc2electrophy(smrx_path: Path, channel_nums: List[Union[int, Any]] = [.
     a = xr.DataArray(dask_array_from_chunk_function(retrieve_data, (len(channel_nums), n_elems), (1, 10**7), float), dims=["channel", "t"], name="data")
     a["t"] = np.arange(n_elems)/fs + start_t
     a["t"].attrs["fs"] = fs
-    a["channel"] = channel_metadata["chan_num"]
+    a["chan_num"] = xr.DataArray(channel_metadata["chan_num"], dims="channel")
     # a["chan_name"] = xr.DataArray(channel_metadata["chan_name"].to_numpy(), dims=["channel"])
     return a
 
