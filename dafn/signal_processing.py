@@ -288,7 +288,7 @@ def compute_csd_from_scaled_fft(
     elif pairs == "diag":
         mask = ffts1[channel1_dim] == ffts2[channel2_dim]
     else:
-        mask = pairs(ffts1[channel_dim], ffts2[channel2_dim])
+        mask = pairs(ffts1[channel1_dim], ffts2[channel2_dim])
     mask = mask.drop_vars(mask.coords.keys())
     if keep_coords is None:
         rm_coords = []

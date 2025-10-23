@@ -41,7 +41,7 @@ def fiber2events(df: pd.DataFrame) -> pd.DataFrame:
     return final_df
 
 
-def lfp2h5(lfp: dict) -> List[xr.Dataset]:
+def lfp2xr(lfp: dict) -> List[xr.Dataset]:
     date = parser.parse(lfp["SessionDate"]).astimezone(tz=None)
     sigs = []
     for d in lfp["IndefiniteStreaming"] if "IndefiniteStreaming" in lfp else lfp["BrainSenseTimeDomain"]:
@@ -69,7 +69,8 @@ def lfp2h5(lfp: dict) -> List[xr.Dataset]:
 
     return all_ds
 
-def eeg2h5(eeg_data):
+import mne.io.edf.edf
+def eeg2xr(eeg_data: mne.io.edf.edf.RawEDF) -> xr.Dataset:
     EEG_chans = [d["ch_name"] for d in eeg_data.info["chs"] if d["kind"] ==2]
     times = eeg_data.times
 
