@@ -134,7 +134,7 @@ def replicate_dim(
         shape = [a.sizes[dim]] * n
         mask = xr.DataArray(np.ones(shape, dtype=bool), dims=new_dims)
     elif callable(selection):
-        mask = selection(*copies) #copies are always datasets as we converted a to a dataset
+        mask = selection(*copies).compute() #copies are always datasets as we converted a to a dataset
         if set(mask.dims) != set(new_dims):
             raise ValueError("The callable parameter selection should return an array whose dims are exactly all duplicated dims")
         if not isinstance(mask, xr.DataArray):
@@ -179,3 +179,128 @@ class DimOps:
     def replicate(self, dim: str, n: int = 2, **kwargs):
         """Replicate a dimension N times (Cartesian-style)."""
         return replicate_dim(self._obj, dim=dim, n=n, **kwargs)
+    
+
+from numba import njit, guvectorize, boolean, int64, float64
+
+# @njit
+# def _compute_nan_mask_numba(obj, overlap):
+#     n = len(obj)
+#     res = np.zeros(n, dtype=np.bool)
+#     overlap = min(overlap, n - 1)
+#     i = 0
+#     count = 0
+#     while i < n:
+#         if np.isnan(obj[i]):
+#             count+=1
+#             start = max(0, i - overlap)
+#             end = min(n, i + overlap + 1)
+
+#             for j in range(start, end):
+#                 res[j] = 1
+#         i += 1
+#     return res, count
+
+# import numpy as np
+# from numba import guvectorize, 
+
+# The core 1D function applied along the axis
+
+@guvectorize(
+    [(float64[:], int64, boolean[:], int64[:])],  # input array, overlap scalar; outputs: mask array, count array
+    '(n),()->(n),()',  # core dimension 'n'; output mask same shape, count is scalar
+    nopython=True
+)
+def _compute_nan_mask_numba(arr, overlap_scalar, mask, count_out):
+    n = arr.shape[0]
+    count = 0
+    for i in range(n):
+        mask[i] = False
+
+    for i in range(n):
+        if np.isnan(arr[i]):
+            count += 1
+            start = max(0, i - overlap_scalar)
+            end = min(n, i + overlap_scalar + 1)
+            for j in range(start, end):
+                mask[j] = True
+
+    count_out[0] = count
+
+def map_overlap(ar: xr.DataArray, dim: str, npy_func, overlap: int, replace_nans: bool = True):
+    """
+    Apply a NumPy-compatible function along one dimension of an xarray DataArray
+    with chunk-wise overlap handling and optional NaN propagation.
+
+    This function wraps `xr.apply_ufunc` and `dask.map_overlap` to apply a
+    custom NumPy function (`npy_func`) to each chunk of data, while ensuring
+    consistency across chunk boundaries using an overlap of `overlap` elements.
+
+    If `replace_nans=True`, any NaN values in the input are replaced with zeros
+    before applying `npy_func`, and NaNs are then re-applied (expanded by the
+    overlap width) using a fast Numba kernel.
+
+    Parameters
+    ----------
+    ar : xr.DataArray
+        Input array (may be backed by Dask).
+    dim : str
+        Name of the core dimension along which to apply the function.
+    npy_func : callable
+        Function that operates on a NumPy 1D array and returns an array of the
+        same shape. It should not depend on global array state.
+    overlap : int
+        Number of overlapping elements to include at chunk boundaries. This
+        value should be large enough to cover the neighborhood radius of the
+        applied function.
+    replace_nans : bool, default True
+        Whether to replace NaNs with zeros before applying `npy_func`, then
+        reapply NaNs to overlapping regions afterwards.
+
+    Returns
+    -------
+    xr.DataArray
+        The transformed DataArray with chunk boundary overlaps trimmed.
+        If the array is too small (<= 2 * overlap along `dim`), returns an
+        empty selection along that dimension.
+
+    Notes
+    -----
+    - Internally uses `xr.apply_ufunc` and `da.map_overlap`, so it supports both
+      NumPy and Dask-backed DataArrays.
+    - For best performance, `npy_func` should be implemented in NumPy or Numba.
+    - Overlap trimming removes `overlap` elements from both edges of the output
+      along `dim`.
+
+    Examples
+    --------
+    >>> def moving_mean(a):
+    ...     return np.convolve(a, np.ones(3)/3, mode="same")
+
+    >>> map_overlap(da, dim="time", npy_func=moving_mean, overlap=1)
+    <xarray.DataArray (time: ...)> ...
+    """
+    if ar.sizes[dim] <= 2*overlap:
+        return ar.isel({dim:[]})
+
+    if replace_nans:
+        def new_npy_func(chunk):
+            mask, count = _compute_nan_mask_numba(chunk, overlap)
+            chunk = np.nan_to_num(chunk, nan=0)
+            res = npy_func(chunk)
+            if (count > 0).any():
+                return np.where(mask, np.nan, res)
+            else:
+                return res
+    else:
+        new_npy_func = npy_func
+        
+    def dask_func(f, ar):
+        if isinstance(ar, da.Array):
+            #Note that because we use xr.apply_ufunc, the core dimension is always the last
+            return da.map_overlap(f, ar, depth={ar.ndim-1:overlap}, boundary=np.nan, trim=True, meta=np.array((), dtype=ar.dtype))
+        else:
+            return f(ar)
+        
+    res = xr.apply_ufunc(lambda ar: dask_func(new_npy_func, ar), ar, input_core_dims=[[dim]], output_core_dims=[[dim]], dask="allowed")
+    return res
