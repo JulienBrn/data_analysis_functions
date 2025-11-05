@@ -105,3 +105,199 @@ def create_broadcast_log() -> Tuple[BroadcastSendLog, Callable[[int], BroadcastR
         return BroadcastReceiveLog(send, start_index)
 
     return send, receive
+
+import pandas as pd, xarray as xr, numpy as np
+from typing import Union, Literal, Optional, Tuple
+import collections.abc
+
+class ValidationError(Exception): pass
+
+Selection = Literal["all", "best:", ":best", "hungarian"]
+Validation = Literal[
+    "1:1", "1:m", "1:1!", "1:m!",
+    "m:1", "m:m", "m:1!", "m:m!",
+    "1!:1", "1!:m", "1!:1!", "1!:m!",
+    "m!:1", "m!:m", "m!:1!", "m!:m!"
+]
+
+def flexible_merge(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    match_type: Literal["callable", "matrix", "pair_list"],
+    matcher: Union[Callable[[pd.Series, pd.Series], Union[bool, float, dict]], np.ndarray],
+    selection: Selection = "all",
+    validation: Validation = "m:m", 
+    how: Literal["inner", "outer", "left", "right"] = "inner",
+    threshold: Union[float, None] = None,
+    default_score: float = np.inf,
+    suffixes: Tuple[str, str] = ("_x", "_y"),
+) -> pd.DataFrame:
+    """
+    Conditionally merge two DataFrames based on a similarity or matching function.
+
+    This function generalizes `pandas.merge` to support fuzzy, scored, or conditional matching
+    between rows of two DataFrames. It separates the merging process into three stages:
+
+    1. **Selection**: Pick candidate matches based on scores or matching logic.
+    2. **Validation**: Enforce cardinality constraints (e.g., one-to-one, many-to-one).
+    3. **Join**: Combine the validated matches into the final DataFrame, using standard
+       join semantics (`inner`, `outer`, `left`, `right`).
+
+    Parameters
+    ----------
+    left : pd.DataFrame
+        Left DataFrame to merge.
+    right : pd.DataFrame
+        Right DataFrame to merge.
+    match_type : Literal["callable", "matrix", "pair_list"]
+        Type of matcher provided. Must be explicitly specified to avoid ambiguity.
+    matcher : callable or array-like
+        Defines how rows in `left` and `right` are considered a match:
+
+        - **Callable**: `f(row_left, row_right) -> bool, float, or dict`
+            * `bool` — True indicates a match the score used is default_score
+            * `float` — numeric match score (higher = better).
+            * `dict` — treated as a match; keys not starting with "_" are added as columns. 
+               If a `"score"` or `"_score"` key exists, it is used as the match score otherwise the associated score is default_score.
+        - **Array-like**:
+            - `match_type="matrix"`: shape `(n_left, n_right)`, numeric scores.
+            - `match_type="pair_list"`: shape `(m, 2)` or `(m, 3)`. First two columns
+              are row indices; optional third column can contain scores or metadata.
+
+    selection : Literal["all", "best:", ":best", "hungarian"], default "all"
+        Strategy for selecting matches after thresholding:
+
+        - `"all"` — keep all matches above `threshold`.
+        - `"best:"` — select the best left match for each right row.
+        - `":best"` — select the best right match for each left row.
+        - `"hungarian"` — optimal one-to-one assignment maximizing total score.
+
+    validation : Validation, default "m:m"
+        Cardinality rules to enforce after selection. `!` indicates that 0 values are not allowed.
+        Raises ValidationError if validation rule is not satisfied.
+
+    how : Literal["inner", "outer", "left", "right"], default "inner"
+        Join type for combining validated matches into the final DataFrame. Behaves like
+        `pandas.merge`.
+
+    threshold : float, optional
+        Filters possible matchings based on score. Matchings with no score specified get the default_score value.
+    default_score : float, optional
+        Numeric score assigned when matcher returns a dict without a `"score"` key.
+    suffixes : tuple[str, str], default ('_x', '_y')
+        Suffixes applied to overlapping column names in the result.
+
+    Returns
+    -------
+    pd.DataFrame
+        Merged DataFrame containing rows that satisfy the matching conditions,
+        augmented with any additional columns returned by the matcher.
+
+    Notes
+    -----
+    - Callable matchers may perform O(n²) comparisons; for large DataFrames, use
+      `matrix` or `pair_list` for efficiency.
+    - Tie-breaking and selection behavior are governed by `selection`.
+    - Validation ensures cardinality constraints are enforced after selection.
+    - `how` determines the final join semantics (inner, outer, left, right).
+    - All matcher outputs are internally converted to a canonical representation of a list of row pairs with a numeric score and metadata dictionary. The conversion rules are:
+        bool — If True, an entry with score=default_score and empty metadata is created; if False, no entry is created.
+        float — An entry with score=<float value> and empty metadata is created.
+        dict — An entry with metadata={k: v for k, v in d.items() if not k.startswith("_")} is created, and score=d.get("score", d.get("_score", default_score)).
+
+    Examples
+    --------
+    >>> def jaccard_match(a, b):
+    ...     score = len(set(a.tags) & set(b.tags)) / len(set(a.tags) | set(b.tags))
+    ...     return {"score": score} if score > 0 else False
+    >>> conditional_merge(
+    ...     df1, df2,
+    ...     matcher=jaccard_match,
+    ...     match_type="callable",
+    ...     selection="best:",
+    ...     validation="1:m",
+    ...     threshold=0.5
+    ... )
+    """
+    left_indices = np.arange(len(left.index))
+    right_indices = np.arange(len(right.index))
+
+    if match_type == "callable":
+        pairs = []
+        for i, (_, lrow) in enumerate(left.iterrows()):
+            for j, (_, rrow) in enumerate(right.iterrows()):
+                m = matcher(lrow, rrow)
+                if isinstance(m, bool):
+                    if m:
+                        pairs.append((i, j, default_score, {}))
+                elif isinstance(m, (int, float)):
+                    pairs.append((i, j, m, {}))
+                elif isinstance(m, collections.abc.Mapping):
+                    score = m.get("score", m.get("_score", default_score))
+                    pairs.append((i, j, score, {k:v for k,v in m.items() if not isinstance(k, str) or not k.startswith("_")}))
+                else:
+                    raise Exception("Wrong return type for matcher")
+    else:
+        raise NotImplementedError("Only callable match type implemented for now")
+    
+    pairs = pd.DataFrame(pairs, columns=["lidx", "ridx", "score", "meta"])
+    if threshold is not None:
+        pairs = pairs.loc[pairs["score"]>threshold]
+    
+    if selection=="all":
+        pass
+    elif selection=="best:":
+        pairs = pairs.sort_values("score", ascending=False).drop_duplicates("ridx")
+    elif selection==":best":
+        pairs = pairs.sort_values("score", ascending=False).drop_duplicates("lidx")
+    elif selection=="hungarian":
+        raise NotImplementedError("Hungarian selection is not implemented for now")
+
+    [leftv, rightv] = validation.split(":")
+    
+    if leftv[0] == "1":
+        if pairs.duplicated("lidx").any():
+            raise ValidationError("Several matches for left dataframe")
+    if rightv[0] == "1":
+        if pairs.duplicated("ridx").any():
+            raise ValidationError("Several matches for right dataframe")
+    if leftv.endswith("!"):
+        if not np.isin(left_indices, pairs["lidx"]).all():
+            raise ValidationError("Missing matches in left dataframe")
+    if rightv.endswith("!"):
+        if not np.isin(right_indices, pairs["ridx"]).all():
+            raise ValidationError("Missing matches in right dataframe")
+        
+    common_names = set(left.columns).intersection(set(right.columns))
+    left = left.rename(columns={k: k+suffixes[0] for k in common_names})
+    right = right.rename(columns={k: k+suffixes[1] for k in common_names})
+
+    metadata = pd.DataFrame(pairs["meta"].tolist())
+    innerleft = left.iloc[pairs["lidx"].values].reset_index(drop=True)
+    innerright = right.iloc[pairs["ridx"].values].reset_index(drop=True)
+
+    # display(innerleft)
+    # display(innerright)
+    # display(metadata)
+
+    concatenated = pd.concat([innerleft, innerright, metadata], axis=1)
+    if how=="inner":
+        return concatenated
+    elif how=="left":
+        missing = np.setdiff1d(left_indices, pairs["lidx"])
+        return pd.concat([concatenated, left.iloc[missing]], axis=0)
+    elif how=="right":
+        missing = np.setdiff1d(right_indices, pairs["ridx"])
+        return pd.concat([concatenated, right.iloc[missing]], axis=0)
+    elif how=="outer":
+        right_missing = np.setdiff1d(right_indices, pairs["ridx"])
+        left_missing = np.setdiff1d(left_indices, pairs["lidx"])
+        return pd.concat([concatenated, right.iloc[right_missing], left.iloc[left_missing]], axis=0)
+        
+
+    
+    
+
+
+    
+    
