@@ -295,9 +295,59 @@ def flexible_merge(
         return pd.concat([concatenated, right.iloc[right_missing], left.iloc[left_missing]], axis=0)
         
 
-    
+def get_subsequence_positions(sub, a, tol=1e-6, max_candidates=50):
+    """
+    Find all starting indices in a where sub occurs within tolerance tol.
+    Combines early pruning with a fully vectorized, memory-efficient final check.
+    """
+    sub = np.asarray(sub)
+    a = np.asarray(a)
+
+    if sub.size > a.size:
+        return []
+
+    n_a = a.size
+    n_sub = sub.size
+    candidates = np.ones(n_a, dtype=bool)
+    candidates[-n_sub+1:] = False  # cannot start a full subsequence here
+
+    # Early pruning
+    for i in range(n_sub):
+        candidates[:n_a - i] &= np.abs(a[i:] - sub[i]) < tol
+        if candidates.sum() < max_candidates:
+            break
+
+    idxs = np.flatnonzero(candidates)
+    if idxs.size == 0:
+        return []
+
+    # Vectorized precise check using direct fancy indexing
+    cols = np.arange(n_sub)
+    windows = a[idxs[:, None] + cols[None, :]]
+    matches = np.all(np.abs(windows - sub) < tol, axis=1)
+
+    return idxs[matches].tolist()
     
 
-
+# def get_subsequence_positions(sub, a, tol=10**(-6)):
+#     if sub.size > a.size:
+#         return []
+#     candidates = np.ones(a.size, dtype=bool)
+#     i= 0
+#     while i<sub.size:
+#         candidates = candidates & (np.abs(np.roll(a, -i) - sub[i]) < tol)
+#         sum = candidates.sum()
+#         if sum < 50:
+#             break
+#         i+=1
+            
+#     candidates = np.flatnonzero(candidates)
+#     res = []
+#     for i in candidates:
+#         if (a.size - i) < sub.size:
+#             break
+#         if (np.abs(a[i:i+sub.size] - sub) < tol).all():
+#             res.append(i)
+#     return res
     
     
