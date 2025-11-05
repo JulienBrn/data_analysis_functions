@@ -33,7 +33,7 @@ class BandpassFilter(Filter, BaseModel):
         return 10/self.low_freq
     
 def _compute_signal_processing(ar: xr.DataArray, func, out_freq: float, distrust_time: float):
-    ar = ar.chunk({k:1 if k!= "t" else -1 for k in ar.dims})
+    ar = ar.chunk(t=-1)
     min_t = int(np.ceil((ar["t"].min().item()+distrust_time)*out_freq))
     max_t = int(np.floor((ar["t"].max().item()-distrust_time)*out_freq))
     final_t = xr.DataArray(np.arange(min_t, max_t+1)/out_freq, dims="t")
