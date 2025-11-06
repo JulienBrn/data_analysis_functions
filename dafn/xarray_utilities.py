@@ -2,11 +2,11 @@ import xarray as xr, pandas as pd, numpy as np
 from pydantic import BaseModel
 import scipy.signal, re
 from abc import ABC, abstractmethod
-from typing import Literal, Union, List, Callable, Any, Hashable, Optional, Sequence, Set, Tuple, TypeVar
+from typing import Literal, Union, List, Callable, Any, Hashable, Optional, Sequence, Set, Tuple, TypeVar, Mapping
 import dask.array as da
 from typing import Protocol
 import xarray as xr
-
+import dask
 
 
 T = TypeVar("T", bound=Union[xr.DataArray, xr.Dataset])
@@ -136,7 +136,7 @@ def replicate_dim(
     elif callable(selection):
         mask = selection(*copies).compute() #copies are always datasets as we converted a to a dataset
         if set(mask.dims) != set(new_dims):
-            raise ValueError("The callable parameter selection should return an array whose dims are exactly all duplicated dims")
+            raise ValueError(f"The callable parameter selection should return an array whose dims are exactly all duplicated dims {mask.dims} {new_dims}")
         if not isinstance(mask, xr.DataArray):
             raise ValueError("The callable parameter selection should return a xr.DataArray")
         if not mask.dtype == bool:
@@ -304,3 +304,88 @@ def map_overlap(ar: xr.DataArray, dim: str, npy_func, overlap: int, replace_nans
         
     res = xr.apply_ufunc(lambda ar: dask_func(new_npy_func, ar), ar, input_core_dims=[[dim]], output_core_dims=[[dim]], dask="allowed")
     return res
+
+def chunk(ar: Union[xr.DataArray, xr.Dataset], chunks: Optional[Mapping[str, Union[int, str]]] = None, 
+          preserve_numpy_coords: bool = True, **chunks_kwargs):
+    """Chunk array with option to preserve numpy coordinates."""
+    if preserve_numpy_coords:
+        # Track which coords are numpy arrays
+        numpy_coords = [c for c in ar.coords if not isinstance(ar[c].data, da.Array)]
+    
+    if chunks is None:
+        chunks_dict = chunks_kwargs
+    else:
+        chunks_dict = {**chunks, **chunks_kwargs}
+    
+    ar = ar.chunk(chunks_dict)
+    
+    if preserve_numpy_coords:
+        for c in numpy_coords:
+            ar[c] = ar[c].compute()
+    
+    return ar
+
+
+
+def xr_merge(
+    left: Union[xr.DataArray, xr.Dataset],
+    right: Union[xr.DataArray, xr.Dataset],
+    on: Union[str, Sequence[str]],
+    how: Literal["inner", "outer", "left", "right"] = "inner",
+    suffixes: Tuple[str, str] = ("_x", "_y"),
+    final_dim: str = None,
+):
+    if isinstance(on, str):
+        on = [on]
+
+    left_coords: xr.Dataset = left[on]
+    right_coords = right[on]
+
+    if len(left_coords.dims) != 1:
+        raise ValueError("Only a single dimension in which to merge is accepted for 'left'")
+    if len(right_coords.dims) != 1:
+        raise ValueError("Only a single dimension in which to merge is accepted for 'right'")
+
+    left_dim = list(left_coords.sizes.keys())[0]
+    right_dim = list(right_coords.sizes.keys())[0]
+
+    if final_dim is None:
+        final_dim = left_dim
+
+    # Handle name collisions
+    left_vars = {v: v + suffixes[0] for v in left.data_vars if v in right.data_vars}
+    right_vars = {v: v + suffixes[1] for v in right.data_vars if v in left.data_vars}
+    left = left.rename(left_vars)
+    right = right.rename(right_vars)
+
+    # Create key DataFrames
+    left_df = left_coords.to_dataframe().reset_index()
+    right_df = right_coords.to_dataframe().reset_index()
+    left_df["__left_indices"] = np.arange(len(left_df))
+    right_df["__right_indices"] = np.arange(len(right_df))
+
+    # Perform merge
+    res = pd.merge(left_df, right_df, how=how, on=on)
+
+    # Build final indices
+    left_index = res["__left_indices"].to_numpy()
+    right_index = res["__right_indices"].to_numpy()
+
+    left_valid = ~np.isnan(left_index)
+    right_valid = ~np.isnan(right_index)
+
+    left_index_filled = np.where(left_valid, left_index, 0).astype(int)
+    right_index_filled = np.where(right_valid, right_index, 0).astype(int)
+
+    final_index_left = xr.DataArray(left_index_filled, dims=final_dim)
+    final_index_right = xr.DataArray(right_index_filled, dims=final_dim)
+
+    left_merged = left.isel({left_dim: final_index_left})
+    right_merged = right.isel({right_dim: final_index_right})
+
+    merged = xr.merge([left_merged, right_merged])
+    merged = merged.assign_coords({k: (final_dim, res[k].to_numpy()) for k in on})
+
+    return merged
+
+    

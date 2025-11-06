@@ -15,12 +15,14 @@ import re
 
 @contextmanager
 def sonfile(path: Path):
-    rec = sp.SonFile(str(path), True)
-    try:
-        yield rec
-    finally:
-        pass
-        # del rec
+    if not isinstance(path, (str, Path)):
+        yield path
+    else:
+        rec = sp.SonFile(str(path), True)
+        try:
+            yield rec
+        finally:
+            del rec
         # rec.close()
 
 def smrxchanneldata(smrx_path: Path) -> pd.DataFrame:
