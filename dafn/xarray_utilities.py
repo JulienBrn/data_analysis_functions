@@ -141,6 +141,7 @@ def replicate_dim(
             raise ValueError("The callable parameter selection should return a xr.DataArray")
         if not mask.dtype == bool:
             raise ValueError("The callable parameter selection should return a boolean array")
+        mask = mask.reset_coords(drop=True)#Perhaps check that dimensions are still aligned as in copies...
     else:
         raise ValueError("Unrecognized value for parameter selection")
     if keep_coords is None:
@@ -153,7 +154,6 @@ def replicate_dim(
     copies = [c.drop_vars(rm_coords) for c in copies]
     rename_coords = [c for c in copies[0].coords if new_dims[0] in copies[0][c].dims and c !=new_dims[0]]
     copies = [c.rename({k: renamer(i, k) for k in rename_coords}) for i, c in enumerate(copies)]
-
     if result_type=="expanded":
         copies = [c.where(mask.sum(d) > 0, drop=True) for c, d in zip(copies, new_dims)]
     elif result_type =="stacked":
@@ -365,26 +365,36 @@ def xr_merge(
     right_df["__right_indices"] = np.arange(len(right_df))
 
     # Perform merge
-    res = pd.merge(left_df, right_df, how=how, on=on)
+    res = pd.merge(left_df, right_df, how="inner", on=on)
 
     # Build final indices
     left_index = res["__left_indices"].to_numpy()
     right_index = res["__right_indices"].to_numpy()
 
-    left_valid = ~np.isnan(left_index)
-    right_valid = ~np.isnan(right_index)
+    if how in ["left", "outer"]:
+        missing = np.setdiff1d(np.arange(left.sizes[left_dim]), left_index)
+        left_index = np.concatenate([left_index, missing])
+    if how in ["right", "outer"]:
+        raise NotImplementedError("right and outer joins not implemented")
+    # left_valid = ~np.isnan(left_index)
+    # right_valid = ~np.isnan(right_index)
 
-    left_index_filled = np.where(left_valid, left_index, 0).astype(int)
-    right_index_filled = np.where(right_valid, right_index, 0).astype(int)
+    # left_index_filled = np.where(left_valid, left_index, 0).astype(int)
+    # right_index_filled = np.where(right_valid, right_index, 0).astype(int)
 
-    final_index_left = xr.DataArray(left_index_filled, dims=final_dim)
-    final_index_right = xr.DataArray(right_index_filled, dims=final_dim)
+    # final_index_left = xr.DataArray(left_index_filled, dims=final_dim)
+    # final_index_right = xr.DataArray(right_index_filled, dims=final_dim)
+    left_index = xr.DataArray(left_index, dims="__tmp")
+    left_index["__tmp"] = np.arange(left_index.size)
+    right_index = xr.DataArray(right_index, dims="__tmp")
+    right_index["__tmp"] = np.arange(right_index.size)
+    left_merged = left.isel({left_dim: left_index})
+    right_merged = right.isel({right_dim: right_index})
 
-    left_merged = left.isel({left_dim: final_index_left})
-    right_merged = right.isel({right_dim: final_index_right})
+    merged = xr.merge([left_merged, right_merged], join=how)
+    merged = merged.drop_vars("__tmp").rename_dims(__tmp=final_dim)
+    # merged = merged.assign_coords({k: (final_dim, res[k].to_numpy()) for k in on})
 
-    merged = xr.merge([left_merged, right_merged])
-    merged = merged.assign_coords({k: (final_dim, res[k].to_numpy()) for k in on})
 
     return merged
 
