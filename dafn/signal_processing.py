@@ -123,7 +123,8 @@ def _compute_ffts_xr(
     return res, win
 
 def compute_scaled_fft(
-        signals: xr.DataArray, zscore: bool=True, 
+        signals: xr.DataArray, 
+        zscore: bool=True, 
         percent_overlap: float = 0.5, 
         scaling: Literal["density", "spectrum"] = "density", 
         approx_window_duration: float = 0.2, approx_freq_fs: float = 1.0, 

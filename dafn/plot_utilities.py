@@ -113,6 +113,82 @@ def add_facet_labels(
 
 
 
+# def faceted_imshow_xarray(
+#     data: xr.DataArray,
+#     r_dim: str,
+#     theta_dim: str,
+#     facet_row: str,
+#     facet_col: str,
+#     colorscale: str = "Viridis",
+#     subplot_height: int = 400,
+#     subplot_width: int = 400,
+# ):
+#     """
+#     Faceted polar 'heatmap' using Barpolar, wrapping smoothly at theta=0/360°.
+#     """
+#     rows = len(data.coords[facet_row])
+#     cols = len(data.coords[facet_col])
+
+#     fig = make_subplots(
+#         rows=rows,
+#         cols=cols,
+#         specs=[[{"type": "polar"} for _ in range(cols)] for _ in range(rows)],
+#         vertical_spacing=0.07,
+#         horizontal_spacing=0.05
+#     )
+
+#     zmin = float(data.min())
+#     zmax = float(data.max())
+
+#     theta = np.asarray(data.coords[theta_dim].values, dtype=float)
+#     r = np.asarray(data.coords[r_dim].values, dtype=float)
+#     dtheta = np.mean(np.diff(theta)) if len(theta) > 1 else 10
+
+#     for i, r_facet in enumerate(data.coords[facet_row]):
+#         for j, c_facet in enumerate(data.coords[facet_col]):
+#             z = data.sel({facet_row: r_facet, facet_col: c_facet})
+
+#             rr, tt, zz = [], [], []
+#             last_r = 0
+#             for ri, rv in enumerate(r):
+#                 for ti, tv in enumerate(theta):
+#                     rr.append(rv-last_r)
+#                     tt.append(tv)
+#                     zz.append(z.isel({r_dim:ri, theta_dim: ti}).item())
+#                 last_r = rv
+#             fig.add_trace(
+#                 go.Barpolar(
+#                     r=rr,
+#                     theta=tt,
+#                     width=[dtheta] * len(tt),
+#                     marker=dict(
+#                         color=zz,
+#                         colorscale=colorscale,
+#                         cmin=zmin,
+#                         cmax=zmax,
+#                         line=dict(width=0),
+#                         colorbar=dict(title="Value"),
+#                     ),
+#                     showlegend=False,
+#                 ),
+#                 row=i + 1,
+#                 col=j + 1,
+#             )
+#     fig.update_layout(
+#         height=subplot_height * rows,
+#         width=subplot_width * cols,
+#         margin=dict(t=100, l=100)
+#     )
+#     fig.update_layout(
+#         polar=dict(
+#             radialaxis=dict(showticklabels=False, ticks='', showgrid=False)
+#         ), **{f"polar{i}": dict( radialaxis=dict(showticklabels=False, ticks='', showgrid=False)) for i in range(2, rows*cols+1)}
+        
+#     )
+#     add_facet_labels(fig,data[facet_row].data,  data[facet_col].data, facet_row, facet_col, polar=True)
+
+#     return fig
+
 def faceted_imshow_xarray(
     data: xr.DataArray,
     r_dim: str,
@@ -122,9 +198,27 @@ def faceted_imshow_xarray(
     colorscale: str = "Viridis",
     subplot_height: int = 400,
     subplot_width: int = 400,
+    hover_data: list[str] | None = None,
 ):
     """
     Faceted polar 'heatmap' using Barpolar, wrapping smoothly at theta=0/360°.
+
+    Parameters
+    ----------
+    data : xr.DataArray
+        Data to plot.
+    r_dim, theta_dim : str
+        Names of the radial and angular dimensions.
+    facet_row, facet_col : str
+        Dimensions for facet grid.
+    colorscale : str, optional
+        Plotly colorscale name.
+    subplot_height, subplot_width : int, optional
+        Per-subplot dimensions.
+    hover_data : list of str, optional
+        List of coordinate or variable names from the DataArray
+        to include in hover information (like Plotly Express).
+        Example: ['radius', 'angle', 'time']
     """
     rows = len(data.coords[facet_row])
     cols = len(data.coords[facet_col])
@@ -134,7 +228,7 @@ def faceted_imshow_xarray(
         cols=cols,
         specs=[[{"type": "polar"} for _ in range(cols)] for _ in range(rows)],
         vertical_spacing=0.07,
-        horizontal_spacing=0.05
+        horizontal_spacing=0.05,
     )
 
     zmin = float(data.min())
@@ -144,18 +238,35 @@ def faceted_imshow_xarray(
     r = np.asarray(data.coords[r_dim].values, dtype=float)
     dtheta = np.mean(np.diff(theta)) if len(theta) > 1 else 10
 
+    # prepare hover data keys
+    hover_data = hover_data or []
+    hover_labels = list(hover_data)  # keep order for labels
+
     for i, r_facet in enumerate(data.coords[facet_row]):
         for j, c_facet in enumerate(data.coords[facet_col]):
             z = data.sel({facet_row: r_facet, facet_col: c_facet})
 
-            rr, tt, zz = [], [], []
+            rr, tt, zz, custom = [], [], [], []
             last_r = 0
             for ri, rv in enumerate(r):
                 for ti, tv in enumerate(theta):
-                    rr.append(rv-last_r)
+                    rr.append(rv - last_r)
                     tt.append(tv)
-                    zz.append(z.isel({r_dim:ri, theta_dim: ti}).item())
+                    val = z.isel({r_dim: ri, theta_dim: ti}).item()
+
+                    # collect hover info for this point
+                    custom_row = []
+                    for key in hover_labels:
+                        custom_row.append(z.isel({r_dim: ri, theta_dim: ti})[key].item())
+                    custom.append([rv, tv, val] + custom_row)
+                    zz.append(val)
                 last_r = rv
+
+            # build hovertemplate dynamically
+            hover_parts = ["r=%{customdata[0]:.2f}", "θ=%{customdata[1]:.1f}", "value=%{customdata[2]:.3f}"]
+            hover_parts += [f"{key}=%{{customdata[{3+idx}]}}" for idx, key in enumerate(hover_labels)]
+            hovertemplate = "<br>".join(hover_parts) + "<extra></extra>"
+
             fig.add_trace(
                 go.Barpolar(
                     r=rr,
@@ -169,23 +280,33 @@ def faceted_imshow_xarray(
                         line=dict(width=0),
                         colorbar=dict(title="Value"),
                     ),
+                    customdata=custom,
+                    hovertemplate=hovertemplate,
                     showlegend=False,
                 ),
                 row=i + 1,
                 col=j + 1,
             )
+
     fig.update_layout(
         height=subplot_height * rows,
         width=subplot_width * cols,
-        margin=dict(t=100, l=100)
+        margin=dict(t=100, l=100),
     )
+
     fig.update_layout(
-        polar=dict(
-            radialaxis=dict(showticklabels=False, ticks='', showgrid=False)
-        ), **{f"polar{i}": dict( radialaxis=dict(showticklabels=False, ticks='', showgrid=False)) for i in range(2, rows*cols+1)}
-        
+        polar=dict(radialaxis=dict(showticklabels=False, ticks='', showgrid=False)),
+        **{
+            f"polar{i}": dict(
+                radialaxis=dict(showticklabels=False, ticks='', showgrid=False)
+            )
+            for i in range(2, rows * cols + 1)
+        },
     )
-    add_facet_labels(fig,data[facet_row].data,  data[facet_col].data, facet_row, facet_col, polar=True)
+
+    add_facet_labels(
+        fig, data[facet_row].data, data[facet_col].data, facet_row, facet_col, polar=True
+    )
 
     return fig
 

@@ -342,9 +342,9 @@ def xr_merge(
     right_coords = right[on]
 
     if len(left_coords.dims) != 1:
-        raise ValueError("Only a single dimension in which to merge is accepted for 'left'")
+        raise ValueError(f"Only a single dimension in which to merge is accepted for 'left', got {left_coords.dims}")
     if len(right_coords.dims) != 1:
-        raise ValueError("Only a single dimension in which to merge is accepted for 'right'")
+        raise ValueError(f"Only a single dimension in which to merge is accepted for 'right', got {right_coords.dims}")
 
     left_dim = list(left_coords.sizes.keys())[0]
     right_dim = list(right_coords.sizes.keys())[0]
@@ -353,8 +353,8 @@ def xr_merge(
         final_dim = left_dim
 
     # Handle name collisions
-    left_vars = {v: v + suffixes[0] for v in left.data_vars if v in right.data_vars}
-    right_vars = {v: v + suffixes[1] for v in right.data_vars if v in left.data_vars}
+    left_vars = {v: v + suffixes[0] for v in left.data_vars if v in right.data_vars and not v in on}
+    right_vars = {v: v + suffixes[1] for v in right.data_vars if v in left.data_vars and not v in on}
     left = left.rename(left_vars)
     right = right.rename(right_vars)
 
@@ -389,11 +389,14 @@ def xr_merge(
     right_index = xr.DataArray(right_index, dims="__tmp")
     right_index["__tmp"] = np.arange(right_index.size)
     left_merged = left.isel({left_dim: left_index})
-    right_merged = right.isel({right_dim: right_index})
+    right_merged = right.isel({right_dim: right_index}).drop_vars(on)
+    left_on = left_merged
+    left_merged = left_merged.drop_vars(on)
+
 
     merged = xr.merge([left_merged, right_merged], join=how)
+    merged = merged.assign_coords({k: left_on[k] for k in on})
     merged = merged.drop_vars("__tmp").rename_dims(__tmp=final_dim)
-    # merged = merged.assign_coords({k: (final_dim, res[k].to_numpy()) for k in on})
 
 
     return merged
