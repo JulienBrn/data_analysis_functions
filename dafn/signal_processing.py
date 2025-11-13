@@ -149,6 +149,16 @@ def compute_scaled_fft(
 
     return ffts*np.sqrt(scale)
 
+def compute_coherence(a1: xr.DataArray, a2: xr.DataArray, time_dim="t"):
+    # Compute cross- and auto-spectra (average over time/windows). Note, the magnitude is not squared
+    sxy = (a1 * np.conj(a2)).mean(time_dim)
+    sxx = (np.abs(a1) ** 2).mean(time_dim)
+    syy = (np.abs(a2) ** 2).mean(time_dim)
+
+    coherence = sxy / np.sqrt(sxx * syy)
+
+    return coherence
+
 
 
 # def compute_psd_from_scaled_fft(ffts: xr.DataArray, time_dim: str = "t", channel_dim="channel", channel_dim_suffix="_2") -> xr.DataArray:
