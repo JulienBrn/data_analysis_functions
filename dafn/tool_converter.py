@@ -2,8 +2,17 @@ import pandas as pd
 import xarray as xr, pandas as pd, numpy as np, json, datetime
 from dateutil import parser
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Literal
 import dask, dask.array as da, tqdm.auto as tqdm
+import re
+from pydantic import Field, BaseModel
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import networkx as nx
+    import mne.io.edf.edf
+
 
 def fiber2events(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -40,14 +49,16 @@ def fiber2events(df: pd.DataFrame) -> pd.DataFrame:
     final_df = pd.concat(res).sort_values("index")[["event_name", "start", "duration"]].reset_index(drop=True)
     return final_df
 
-def eeg2events(df: pd.DataFrame) -> pd.DataFrame:
+def mne2events(eeg_data: "mne.io.edf.edf.RawEDF") -> pd.DataFrame:
+    import mne
+    df = pd.DataFrame(mne.find_events(eeg_data,initial_event=True, output="step", consecutive=True), columns=["index", "from", "to"])
+    df["t"] = eeg_data.times[df["index"]]
     df = df.copy()
     df = df[["t", "from", "to"]]
 
     df["from_next"] = df["from"].shift(-1, fill_value=0)
     df["t_next"] = df["t"].shift(-1)
     if (df["from_next"] != df["to"]).any():
-        print(df)
         raise Exception("events are not isolated")
     df["duration"] = df["t_next"] - df["t"]
     df["event_name"] = df["to"]
@@ -91,8 +102,8 @@ def lfp2xr(lfp: dict) -> List[xr.Dataset]:
 
     return all_ds
 
-import mne.io.edf.edf
-def eeg2xr(eeg_data: mne.io.edf.edf.RawEDF) -> xr.Dataset:
+
+def eeg2xr(eeg_data: "mne.io.edf.edf.RawEDF") -> xr.Dataset:
     EEG_chans = [d["ch_name"] for d in eeg_data.info["chs"] if d["kind"] ==2]
     times = eeg_data.times
 
@@ -125,3 +136,154 @@ def eeg2xr(eeg_data: mne.io.edf.edf.RawEDF) -> xr.Dataset:
     ds["data"] = xr.DataArray(darr, dims=["channel", "t"])
 
     return ds
+
+def polydat2df(dat_path: Path, task_path: Path | None):
+    dat_df = pd.read_csv(Path(dat_path), sep="\t", 
+                         names=['time (ms)', 'family', 'nbre', '_P', '_V', '_L', '_R', '_T', '_W', '_X', '_Y', '_Z'], 
+                         skiprows=13, dtype=int
+    )
+    dat_df["t"] = dat_df.pop('time (ms)')/1000
+    dat_df["curr_node"] =  dat_df["_T"].where(dat_df["family"]==10).ffill()
+    if task_path:
+        task_df = polyex2df(task_path)
+        names = []
+        pat = r'(?P<name>\D+\d*)' + re.escape(r'(') + r'(?P<family>\d+),(?P<nbre>\d+)'+re.escape(')')
+        for c in task_df.columns:
+            m= re.match(pat, c)
+            if m:
+                names.append(m.groupdict())
+        names = pd.DataFrame(names)
+        for col in ["family", "nbre"]:
+            names[col] = names[col].replace('', None).astype(pd.Int64Dtype())
+
+        event_df = pd.merge(dat_df, names, on=["family", "nbre"], how="inner")
+        return event_df
+    else:
+        return dat_df
+
+def polyex2df(task_path: Path | str) -> pd.DataFrame:
+    
+    task_path = Path(task_path)
+    with Path(task_path).open("r") as f:
+        i=0
+        while(f):
+            l = f.readline().split("\t")
+            if len([x for x in l if "NEXT" in x]) >1:
+                break
+            i+=1
+    task_df = pd.read_csv(task_path, sep="\t", skiprows=i)
+    task_df = task_df.rename(columns={task_df.columns[0]: "task_node" })
+    return task_df
+
+def polyex2graph(task_path: Path | str) -> "nx.DiGraph":
+    import networkx as nx
+    task_df = polyex2df(task_path)
+    df = task_df
+    df = df.loc[~pd.isna(df["task_node"])]
+    df = df.dropna(subset=df.columns[1:], how="all")
+    df["task_node"] = df["task_node"].astype(int)
+    graph = nx.DiGraph()
+    for _, row in df.iterrows():
+        row = row.dropna().to_dict()
+        names = []
+        graph.add_node(row["task_node"])
+        node = graph.nodes[row["task_node"]]
+        for col in row:
+            if col.startswith("NEXT"):
+                pattern = r'\(.+\)$'
+                ns = re.findall(pattern, row[col])
+                if len(ns) == 0:
+                    next_line = row["task_node"]+1
+                    cond = row[col]
+                elif len(ns) ==1:
+                    cond = row[col][:-len(ns[0])]
+                    nlname = ns[0][1: -1]
+                    if re.match(r'\d+', nlname):
+                        next_line = int(nlname)
+                    else:
+                        next_line = df.loc[(df[["T1", "T2", "T3"]].apply(lambda s: s.str.lstrip("_")) == nlname).any(axis=1)]["task_node"]
+                        if len(next_line) != 1:
+                            raise Exception(f"problem {len(next_line)} {nlname}")
+                        next_line = next_line.iat[0]
+                else:
+                    raise Exception("Problem")
+                graph.add_edge(row["task_node"], next_line, cond=cond)
+            elif re.match(r"T\d+", col):
+                m = re.match(r'(?P<time>\d*-?\d*)_(?P<name>\w+)$', str(row[col]))
+                if not m is None:
+                    names.append(m["name"])
+                    if m["time"]:
+                        node[col] = m["time"]
+                else:
+                    node[col] = row[col]
+            else:
+                node[col] = row[col]
+        node["poly_names"] = names
+    return graph
+
+
+
+
+class BinaryFamilyProcessInfo(BaseModel):
+    kind: Literal["binary"] = "binary"
+    reverse: bool = False
+    nbre_filter: List[int] = []
+    def handle_group(self, group, state_col, name):
+        group = group.loc[group[state_col] != group[state_col].shift(1)].copy()
+        group[state_col] = group[state_col].astype(bool)
+        if self.reverse:
+            group[state_col] = ~group[state_col]
+        if group[state_col].iat[0] == 0:
+            group=group.iloc[1:, :]
+        if len(group.index) == 0:
+            return pd.DataFrame([], columns=["start", "duration", "event_name", "start_node", "end_node"])
+        if (group[state_col].iloc[::2] != 1).any():
+            print(group)
+            raise Exception("Problem")
+        if (group[state_col].iloc[1::2] != 0).any():
+            print(group)
+            raise Exception("Problem")
+        rises = group["t"].iloc[::2]
+        falls = group["t"].iloc[1::2].tolist()
+        start_node = group["curr_node"].iloc[::2]
+        end_node = group["curr_node"].iloc[1::2].tolist()
+        if group[state_col].iat[-1] != 0:
+            falls+=[np.nan]
+            end_node+=[None]
+        return pd.DataFrame().assign(start=rises, duration=falls-rises, event_name=name, start_node=start_node, end_node=end_node)
+    
+class EventFamilyProcessInfo(BaseModel):
+    kind: Literal["event"] = "event"
+    nbre_filter: List[int] = []
+    def handle_group(self, group, state_col, name):
+        group = group.loc[group[state_col].astype(bool)].copy()
+        rises = group["t"]
+        start_node = group["curr_node"]
+        return pd.DataFrame().assign(start=rises, duration=np.nan, event_name=name, start_node=start_node, end_node=np.nan)
+
+
+basic_poly_processing_family = {
+    1: {"_P": BinaryFamilyProcessInfo()},
+    2: {"_V": BinaryFamilyProcessInfo()},
+    5: {"_P": EventFamilyProcessInfo()},
+    6: {"_P": BinaryFamilyProcessInfo(reverse=True), "_V": BinaryFamilyProcessInfo(reverse=True, nbre_filter=[20])},
+    13: {"_P": BinaryFamilyProcessInfo()},
+    15: {"_P": BinaryFamilyProcessInfo()},
+}
+
+def convert2events(event_df: pd.DataFrame, 
+                   processing: Dict[int, Dict[str, BinaryFamilyProcessInfo | EventFamilyProcessInfo]] = basic_poly_processing_family):
+    results = []
+    for (n, f, nb), group in event_df.groupby(["name", "family", "nbre"]):
+        if not f in processing:
+            raise Exception(f"Unhandled family {f}")
+        state_col = {k: v for k, v in processing[f].items() if not nb in v.nbre_filter}
+        if len(state_col) > 1:
+            for s, g in state_col.items():
+                results.append(g.handle_group(group, s, n+s))
+        elif len(state_col) == 1:
+            for s, g in state_col.items():
+                results.append(g.handle_group(group, s, n))
+
+    results = pd.concat(results, ignore_index=True)
+    return results

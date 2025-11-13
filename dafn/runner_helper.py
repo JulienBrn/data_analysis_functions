@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List
 import shutil
 import contextlib
+import pandas as pd
 
 with Path("/home/t4user/Documents/ServerApps/task_manager/config.yaml").open("r") as f:
     config = yaml.safe_load(f)
@@ -85,6 +86,13 @@ class CheckOutputPaths(Generic[T], ContextManager[T]):
 def check_output_paths(paths: T, overwrite: bool) -> CheckOutputPaths[T]:
     return CheckOutputPaths(paths, overwrite)
 
+
+def finalize_events(final_df: pd.DataFrame, output_path: Path):
+    print(final_df)
+    print("Counts are: ")
+    print(final_df.groupby("event_name").size())
+
+    final_df.sort_values("start").to_excel(output_path, index=False)
 # @contextlib.contextmanager
 # def check_output_paths(paths: T, overwrite: str) -> Generator[T, None, None]:
 #     is_single = isinstance(paths, Path)
