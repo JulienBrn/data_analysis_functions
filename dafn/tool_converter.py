@@ -40,6 +40,28 @@ def fiber2events(df: pd.DataFrame) -> pd.DataFrame:
     final_df = pd.concat(res).sort_values("index")[["event_name", "start", "duration"]].reset_index(drop=True)
     return final_df
 
+def eeg2events(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df = df[["t", "from", "to"]]
+
+    df["from_next"] = df["from"].shift(-1, fill_value=0)
+    df["t_next"] = df["t"].shift(-1)
+    if (df["from_next"] != df["to"]).any():
+        print(df)
+        raise Exception("events are not isolated")
+    df["duration"] = df["t_next"] - df["t"]
+    df["event_name"] = df["to"]
+    df["start"] = df["t"]
+    df = df[["event_name", "start", "duration"]]
+
+    zero_df = df.iloc[1::2, :]
+    if (zero_df["event_name"] != 0).any():
+        raise Exception("events do not always go back to 0")
+    final_df = df.iloc[::2, :]
+    if (final_df["event_name"] == 0).any():
+        raise Exception("non-events found...")
+
+    return final_df
 
 def lfp2xr(lfp: dict) -> List[xr.Dataset]:
     date = parser.parse(lfp["SessionDate"]).astimezone(tz=None)
