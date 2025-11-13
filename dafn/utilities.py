@@ -110,7 +110,10 @@ import pandas as pd, xarray as xr, numpy as np
 from typing import Union, Literal, Optional, Tuple
 import collections.abc
 
-class ValidationError(Exception): pass
+class ValidationError(Exception):
+    def __init__(self, msgs: List[str], result: Optional[pd.DataFrame]):
+        super().__init__("\n".join(msgs))
+        self.result = result
 
 Selection = Literal["all", "best:", ":best", "hungarian"]
 Validation = Literal[
@@ -131,6 +134,7 @@ def flexible_merge(
     threshold: Union[float, None] = None,
     default_score: float = np.inf,
     suffixes: Tuple[str, str] = ("_x", "_y"),
+    on_validation_errors: Literal["raise_fast", "raise_with_result", "raise_with_error_columns"] = "raise_with_error_columns"
 ) -> pd.DataFrame:
     """
     Conditionally merge two DataFrames based on a similarity or matching function.
@@ -255,18 +259,25 @@ def flexible_merge(
 
     [leftv, rightv] = validation.split(":")
     
+    validation_errors = []
+    pairs["_has_error"] = False
     if leftv[0] == "1":
         if pairs.duplicated("lidx").any():
-            raise ValidationError("Several matches for left dataframe")
+            pairs["_has_error"] = pairs["_has_error"] | pairs.duplicated("lidx", keep=False).any()
+            validation_errors.append(f"Several matches for left dataframe")
     if rightv[0] == "1":
         if pairs.duplicated("ridx").any():
-            raise ValidationError("Several matches for right dataframe")
+            pairs["_has_error"] = pairs["_has_error"] | pairs.duplicated("ridx", keep=False).any()
+            validation_errors.append(f"Several matches for right dataframe")
     if leftv.endswith("!"):
         if not np.isin(left_indices, pairs["lidx"]).all():
-            raise ValidationError("Missing matches in left dataframe")
+            validation_errors.append(f"Missing matches for left dataframe")
     if rightv.endswith("!"):
         if not np.isin(right_indices, pairs["ridx"]).all():
-            raise ValidationError("Missing matches in right dataframe")
+            validation_errors.append(f"Missing matches for right dataframe")
+
+    if on_validation_errors == "raise_fast":
+        raise ValidationError(validation_errors, None)
         
     common_names = set(left.columns).intersection(set(right.columns))
     left = left.rename(columns={k: k+suffixes[0] for k in common_names})
@@ -275,25 +286,30 @@ def flexible_merge(
     metadata = pd.DataFrame(pairs["meta"].tolist())
     innerleft = left.iloc[pairs["lidx"].values].reset_index(drop=True)
     innerright = right.iloc[pairs["ridx"].values].reset_index(drop=True)
+        
 
     # display(innerleft)
     # display(innerright)
     # display(metadata)
 
     concatenated = pd.concat([innerleft, innerright, metadata], axis=1)
+    if validation_errors and on_validation_errors == "raise_with_error_columns":
+        concatenated["_has_error"] = pairs["_has_error"].to_numpy()
     if how=="inner":
-        return concatenated
+        result = concatenated
     elif how=="left":
         missing = np.setdiff1d(left_indices, pairs["lidx"])
-        return pd.concat([concatenated, left.iloc[missing]], axis=0)
+        result= pd.concat([concatenated, left.iloc[missing]], axis=0)
     elif how=="right":
         missing = np.setdiff1d(right_indices, pairs["ridx"])
-        return pd.concat([concatenated, right.iloc[missing]], axis=0)
+        result= pd.concat([concatenated, right.iloc[missing]], axis=0)
     elif how=="outer":
         right_missing = np.setdiff1d(right_indices, pairs["ridx"])
         left_missing = np.setdiff1d(left_indices, pairs["lidx"])
-        return pd.concat([concatenated, right.iloc[right_missing], left.iloc[left_missing]], axis=0)
-        
+        result= pd.concat([concatenated, right.iloc[right_missing], left.iloc[left_missing]], axis=0)
+    if validation_errors:
+        raise ValidationError(validation_errors, result)
+    return result
 
 def get_subsequence_positions(sub, a, tol=1e-6, max_candidates=50):
     """

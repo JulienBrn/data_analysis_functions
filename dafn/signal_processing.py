@@ -127,7 +127,7 @@ def compute_scaled_fft(
         zscore: bool=True, 
         percent_overlap: float = 0.5, 
         scaling: Literal["density", "spectrum"] = "density", 
-        approx_window_duration: float = 0.2, approx_freq_fs: float = 1.0, 
+        approx_window_duration: float = 1.0, approx_freq_fs: float = 1.0, 
         detrend : Literal["linear", "constant"] = "linear",
         window="hann",
         time_dim: str = "t",
