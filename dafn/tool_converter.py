@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import networkx as nx
     import mne.io.edf.edf
+    from brpylib import NsxFile
 
 
 def fiber2events(df: pd.DataFrame) -> pd.DataFrame:
@@ -287,3 +288,42 @@ def convert2events(event_df: pd.DataFrame,
 
     results = pd.concat(results, ignore_index=True)
     return results
+
+
+
+def blackrock2xr(nsx_file: 'brpylib.nsx_file.NsxFile') -> xr.Dataset:
+    nsx_data = nsx_file.getdata("all", 0, "all", 1, full_timestamps=True)
+    ext_headers = pd.DataFrame(nsx_file.extended_headers).to_xarray().set_coords("ElectrodeID").rename(ElectrodeID="elec_id").drop_vars("index").rename(index="channel")
+    all_data = nsx_data["data"][0]
+
+    def read_chunk(chan_index, t_index, chunk_size):
+        ret = np.asarray(all_data[chan_index:chan_index+1, t_index:t_index+chunk_size])
+        return ret
+
+    channel_chunks = []
+    n_chunks=0
+    for chan_index in range(0, all_data.shape[0], 1):
+        time_chunks = []
+        for t_index in range(0, all_data.shape[1], 10**6):
+            n_chunks+=1
+            chunk_size = min(10**6, all_data.shape[1] - t_index)
+            chunk = da.from_delayed(dask.delayed(read_chunk)(chan_index, t_index, chunk_size),
+                shape=(1, ) + (chunk_size, ),
+                dtype=all_data.dtype
+            )
+            time_chunks.append(chunk)
+        channel_chunks.append(da.concatenate(time_chunks, axis=1))
+    darr = da.concatenate(channel_chunks, axis=0)
+    d = xr.Dataset()
+    arr = xr.DataArray(darr, dims=["channel", "t"])
+    arr["t"] =  np.arange(all_data.shape[1]) / nsx_file.basic_header['SampleResolution'] 
+    arr["t"].attrs["fs"] = float(nsx_file.basic_header['SampleResolution'])
+    d["data"] = arr
+    d["elec_id"] = xr.DataArray(nsx_data["elec_ids"], dims="channel")
+    d = d.set_coords(["elec_id"])
+    d = xr.merge([d, ext_headers])
+    d.attrs["comment"] = str(nsx_file.basic_header["Comment"])
+    d.attrs["recording_date"] = str(nsx_file.basic_header["TimeOrigin"])
+    d["channel"] = d["elec_id"]
+    d = d.drop_vars("elec_id")
+    return d

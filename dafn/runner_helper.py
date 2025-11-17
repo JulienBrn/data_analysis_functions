@@ -1,10 +1,8 @@
-import re
-import yaml
 from pathlib import Path
-from typing import List
-import shutil
-import contextlib
-import pandas as pd
+import shutil, re, yaml
+from pydantic import BaseModel, Field
+from typing import List, Dict, Annotated, Tuple, Literal, Union, TypeVar, Generic, ContextManager
+import xarray as xr, pandas as pd, numpy as np, dask
 
 with Path("/home/t4user/Documents/ServerApps/task_manager/config.yaml").open("r") as f:
     config = yaml.safe_load(f)
@@ -16,27 +14,6 @@ def get_file_pattern_from_suffix_list(suffixes):
         return '(('+ ")|(".join([re.escape(opt) for opt in options])+ '))'
     return '^'+ mk_or_pattern(start_path_patterns)+r'[^\\]*'+ mk_or_pattern(suffixes) + "$"
 
-# def check_output_paths(paths: Path | List[Path], overwrite):
-#     if isinstance(paths, Path):
-#         paths = [paths]
-#     for path in paths:
-#         if path.exists():
-#             if overwrite =="yes":
-#                 if path.is_dir():
-#                     shutil.rmtree(path)
-#                 else:
-#                     path.unlink()
-#             else:
-#                 raise Exception(f"Output path {path} already exists")
-#         else:
-#             path.parent.mkdir(parents=True, exist_ok=True)
-
-
-
-import shutil
-import contextlib
-from pathlib import Path
-from typing import Union, List, Generator, TypeVar, Generic, ContextManager
 
 T = TypeVar('T', Path, List[Path])
 
@@ -93,50 +70,44 @@ def finalize_events(final_df: pd.DataFrame, output_path: Path):
     print(final_df.groupby("event_name").size())
 
     final_df.sort_values("start").to_excel(output_path, index=False)
-# @contextlib.contextmanager
-# def check_output_paths(paths: T, overwrite: str) -> Generator[T, None, None]:
-#     is_single = isinstance(paths, Path)
-#     paths = [paths] if is_single else list(paths)
 
-#     # Handle existing final output paths
-#     for path in paths:
-#         if path.exists():
-#             if overwrite.lower() == "yes":
-#                 if path.is_dir():
-#                     shutil.rmtree(path)
-#                 else:
-#                     path.unlink()
-#             else:
-#                 raise FileExistsError(f"Output path '{path}' already exists.")
-#         else:
-#             path.parent.mkdir(parents=True, exist_ok=True)
 
-#     # Prepare corresponding temporary output paths
-#     tmp_paths = [p.with_name(f".tmp{p.name}") for p in paths]
 
-#     # Clean up stale tmp files if they exist
-#     for tmp in tmp_paths:
-#         if tmp.exists():
-#             if tmp.is_dir():
-#                 shutil.rmtree(tmp)
-#             else:
-#                 tmp.unlink()
+class XarrayLoader(BaseModel):
+    input_path: Annotated[Path, Field(
+        description="Path to the file contining the data from which to extract events",
+        default="/media/t4user/data1/Data/SpikeSorting/....xr.zarr", 
+        json_schema_extra=dict(pattern=get_file_pattern_from_suffix_list([".xr.h5", ".xr.zarr"]))
+    )]
+    data_array_name: str | None = None
+    load_method: Literal["h5", "zarr", "auto"] = "auto"
+    slice_start : float | None = None
+    slice_end : float | None = None
 
-#     try:
-#         # Yield either a single tmp path or list of them
-#         yield tmp_paths[0] if is_single else tmp_paths
-#     except BaseException:
-#         # Exception occurred: clean up temp files
-#         for tmp in tmp_paths:
-#             if tmp.exists():
-#                 if tmp.is_dir():
-#                     shutil.rmtree(tmp)
-#                 else:
-#                     tmp.unlink()
-#         raise  # Re-raise the original exception
-#     else:
-#         # No exception: move tmp to final paths
-#         for tmp, final in zip(tmp_paths, paths):
-#             shutil.move(str(tmp), str(final))
+    def load(self) -> xr.DataArray:
+        if self.load_method == "auto":
+            if self.input_path.suffix == ".zarr":
+                load_method="zarr"
+            elif self.input_path.suffix == ".h5":
+                load_method="h5"
+            else:
+                raise Exception("Unknown load method")
+        else:
+            load_method = self.load_method
 
+        if load_method == "zarr":
+            ds= xr.open_zarr(self.input_path)
+        elif load_method == "h5":
+            ds= xr.open_dataset(self.input_path)
+        else:
+            raise Exception("Unknown load method")
         
+        with dask.diagnostics.ProgressBar():
+            ds = ds.sel(t=slice(self.slice_start, self.slice_end)).compute()
+        if self.data_array_name is None:
+            if "__xarray_dataarray_variable__" in ds:
+                return ds["__xarray_dataarray_variable__"]
+            else:
+                raise Exception("Array name needs to be provided")
+        else:
+            return ds[self.data_array_name]
