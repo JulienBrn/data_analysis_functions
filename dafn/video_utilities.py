@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 import plotly.express as px
-import numpy as np, xarray as xr, tqdm
+import numpy as np, xarray as xr, tqdm, pandas as pd
 
 def compress_video(
     video_path: Path,
@@ -135,3 +135,20 @@ def get_luminosity(annotation_num, video_path, fig_output_path, max_n_frames):
     luminosities["t"].attrs["fs"] = fps
     luminosities = luminosities/image["mask"].sum(["y", "x"])
     return luminosities
+
+def dlc_predict(model_path: Path, video_path: Path) -> xr.DataArray:
+    import deeplabcut, tempfile
+    with tempfile.TemporaryDirectory() as dlc_dest:
+        print(dlc_dest)
+        deeplabcut.analyze_videos(
+            f'{model_path}/config.yaml',
+            [str(video_path)],
+            save_as_csv=False,
+            gputouse=0,
+            destfolder=dlc_dest
+        )
+        h5_file = next(Path(dlc_dest).glob("*.h5"), None)
+        df = pd.read_hdf(h5_file)
+    df.index.name="frame_num"
+    return df.stack("scorer").stack("bodyparts").stack("coords").to_xarray()
+        
