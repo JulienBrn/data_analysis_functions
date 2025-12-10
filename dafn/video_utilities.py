@@ -150,5 +150,247 @@ def dlc_predict(model_path: Path, video_path: Path) -> xr.DataArray:
         h5_file = next(Path(dlc_dest).glob("*.h5"), None)
         df = pd.read_hdf(h5_file)
     df.index.name="frame_num"
-    return df.stack("scorer").stack("bodyparts").stack("coords").to_xarray()
+    res =  df.stack("scorer").stack("bodyparts").stack("coords").to_xarray()
+    if res.sizes["scorer"] !=1:
+        raise Exception(f"Multiple scorers not supported, got {res.sizes['scorer']}")
+    res = res.isel(scorer=0, drop=True)
+    return res
+
+
+
+
+def annotate_video2(video_path: Path, output_path: Path, pose: xr.DataArray, skeleton=None):
+    import cv2
+    import numpy as np
+    import xarray as xr
+    import matplotlib.cm as cm
+    import numba
+
+    @numba.njit
+    def stamp_all_bodyparts(frame, xs, ys, ps, masks, alphas, threshold=0.8):
+        """
+        Stamp multiple body parts on a frame in one Numba call.
+
+        frame: HxWx3 uint8 array
+        xs, ys: bodypart coordinates for this frame, int arrays of shape (num_bodyparts,)
+        ps: confidence values for bodyparts, float array of shape (num_bodyparts,)
+        masks, alphas: lists of masks and alpha arrays for each body part
+        """
+        num_bodyparts = xs.shape[0]
+        frame_height, frame_width, _ = frame.shape
+        mask_size = masks[0].shape[0]
+
+        for bp in range(num_bodyparts):
+            if ps[bp] <= threshold:
+                continue
+            x = xs[bp]
+            y = ys[bp]
+
+            if x <= -mask_size or y <= -mask_size:
+                continue
+
+            mask = masks[bp]
+            alpha = alphas[bp]
+
+            for i in range(mask_size):
+                yi = y + i
+                if yi < 0 or yi >= frame_height:
+                    continue
+                for j in range(mask_size):
+                    xi = x + j
+                    if xi < 0 or xi >= frame_width:
+                        continue
+                    if alpha[i, j]:
+                        for c in range(3):
+                            frame[yi, xi, c] = mask[i, j, c]
+
+    if skeleton is not None:
+        print("Skeleton drawing is not yet implemented")
+
+    cap = cv2.VideoCapture(str(video_path))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+    out = cv2.VideoWriter(str(output_path), fourcc, fps, (frame_width, frame_height))
+
+    num_bodyparts = pose.sizes["bodyparts"]
+    num_frames = pose.sizes["frame_num"]
+
+    # Colors per bodypart
+    cmap = cm.get_cmap("jet", num_bodyparts)
+    colors = [tuple(int(c * 255) for c in cmap(i)[:3]) for i in range(num_bodyparts)]
+
+    mask_size = 11
+    radius = mask_size // 2
+
+    # Precreate masks
+    def make_circle_mask(color):
+        d = mask_size
+        yy, xx = np.ogrid[:d, :d]
+        circle = (xx - radius) ** 2 + (yy - radius) ** 2 <= radius * radius
+
+        mask = np.zeros((d, d, 3), dtype=np.uint8)
+        mask[circle] = color
+
+        alpha = circle  # bool array, faster to use directly
+
+        return mask, alpha
+
+    circles = [make_circle_mask(color) for color in colors]
+
+    # Body part coordinates
+    x = (
+        pose.sel(coords="x")
+        .transpose("frame_num", "bodyparts")
+        .fillna(-mask_size-1)
+        .to_numpy()
+        - mask_size / 2
+    ).astype(int)
+
+    y = (
+        pose.sel(coords="y")
+        .transpose("frame_num", "bodyparts")
+        .fillna(-mask_size-1)
+        .to_numpy()
+        - mask_size / 2
+    ).astype(int)
+
+    p = pose.sel(coords="p").transpose("frame_num", "bodyparts").to_numpy()
+
+
+
+    # Main loop
+    for i in range(num_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Stamp all bodyparts at once
+        stamp_all_bodyparts(frame, x[i], y[i], p[i], [c[0] for c in circles], [c[1] for c in circles])
+
+    out.write(frame)
+
+    cap.release()
+    out.release()
+
+def annotate_video(video_path: Path, output_path: Path, pose: xr.DataArray, radius=5):
+    import cv2
+    import numpy as np
+    import xarray as xr
+    import matplotlib.cm as cm
+    import numba
+
+    cap = cv2.VideoCapture(str(video_path))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+    out = cv2.VideoWriter(str(output_path), fourcc, fps, (frame_width, frame_height))
+
+    num_bodyparts = pose.sizes["bodyparts"]
+    num_frames = pose.sizes["frame_num"]
+
+    # Colors per bodypart
+    cmap = cm.get_cmap("jet", num_bodyparts)
+    colors = np.array([tuple(int(c * 255) for c in cmap(i)[:3]) for i in range(num_bodyparts)])
+
+    # Precompute circle offsets
+    def circle_offsets(radius):
+        yy, xx = np.ogrid[-radius:radius+1, -radius:radius+1]
+        circle = xx**2 + yy**2 <= radius**2
+        return np.column_stack((xx[circle], yy[circle]))
+
+    circle_coords = [circle_offsets(radius) for _ in range(num_bodyparts)]
+
+    # Body part coordinates
+    x = (
+        pose.sel(coords="x")
+        .transpose("frame_num", "bodyparts")
+        .fillna(-radius-1)
+        .to_numpy()
+        .astype(int)
+    )
+
+    y = (
+        pose.sel(coords="y")
+        .transpose("frame_num", "bodyparts")
+        .fillna(-radius-1)
+        .to_numpy()
+        .astype(int)
+    )
+
+    p = pose.sel(coords="p").transpose("frame_num", "bodyparts").to_numpy()
+
+    @numba.njit
+    def stamp_circles(frame, xs, ys, ps, coords_list, colors, threshold=0.8):
+        num_bodyparts = xs.shape[0]
+        frame_h, frame_w, _ = frame.shape
+
+        for bp in range(num_bodyparts):
+            if ps[bp] <= threshold:
+                continue
+
+            cx = xs[bp]
+            cy = ys[bp]
+
+            if cx <= -radius or cy <= -radius:
+                continue
+
+            coords = coords_list[bp]
+            color = colors[bp]
+
+            for k in range(coords.shape[0]):
+                xi = cx + coords[k, 0]
+                yi = cy + coords[k, 1]
+
+                if 0 <= xi < frame_w and 0 <= yi < frame_h:
+                    for c in range(3):
+                        frame[yi, xi, c] = color[c]
+
+    # Main loop
+    for i in range(num_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        stamp_circles(frame, x[i], y[i], p[i], circle_coords, colors)
+
+        out.write(frame)
+
+    cap.release()
+    out.release()
+
+
+            # cv2.circle(frame, (int(), int(y[frame_num, bodypart_num])), 5, colors[bodypart_num], -1)
+
+        # frame_data = pose.sel(frame_num=frame_num).to_dataset()
+        # coords = all_coords[frame_idx]
+        # points = np.array(coords).reshape(num_bodyparts, 3)[:, :2] 
+        # confidence = np.array(coords).reshape(num_bodyparts, 3)[:, 2]  
+
+        # for i, j in skeleton_indices:
+        #     if (
+        #         not np.isnan(points[i]).any() and not np.isnan(points[j]).any()
+        #         and confidence[i] > 0.8 and confidence[j] > 0.8
+        #     ):
+        #         cv2.line(frame, tuple(points[i].astype(int)), tuple(points[j].astype(int)), (0, 0, 0), 2)
+
+
+        # for idx, (x, y) in enumerate(points):
+        #     if not np.isnan(x) and not np.isnan(y) and confidence[idx] > 0.8:
+        #         bodypart_name = bodyparts[idx]
+        #         color = bodypart_colors[bodypart_name]                
+        #         bgr_color = (color[2], color[1], color[0])         
+        #         cv2.circle(frame, (int(x), int(y)), 5, bgr_color, -1)
+        # out.write(frame)
+
+        # frame_idx += 1
+        # if frame_idx >= len(all_coords):  
+        #     break
+
         
