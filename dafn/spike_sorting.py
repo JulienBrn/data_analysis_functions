@@ -37,7 +37,7 @@ def spikesort(rec: si.BaseRecording, sorter_name: str = "kilosort4", tmp_folder_
         base_sorter_params = dict(do_CAR= False, do_correction= False, skip_kilosort_preprocessing= False)
     else:
         base_sorter_params = {}
-    if shutil.disk_usage(tmp_folder_path.parent).free < 1.5*rec.get_memory_size():
+    if shutil.disk_usage(tmp_folder_path.parent).free < 2.*rec.get_memory_size():
         raise Exception(f"They may be not enough free space at location {tmp_folder_path.parent} (we take factor 1.5 margin). Free space: {shutil.disk_usage(tmp_folder_path.parent).free}. Expected size: {rec.get_memory_size()}.")
     try:
         result = sis.run_sorter(recording = rec, folder= tmp_folder_path,  sorter_name=sorter_name, **(base_sorter_params | sorter_params))
@@ -68,6 +68,7 @@ def create_spikeinterface_analyzer(rec: si.BaseRecording, sorting : si.BaseSorti
     real_params = {k:(analyzer.get_default_extension_params(k) | params.get(k, {}))  
             for k in analyzer.get_computable_extensions() if params.get(k, {}) != False}
     analyzer.compute_several_extensions(real_params, **job_kwargs)
+    return analyzer
 
 
 dimensions = dict(principal_components=["rnd_spike", "pc", "sparse_channel"],

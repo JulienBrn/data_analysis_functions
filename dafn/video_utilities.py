@@ -213,7 +213,7 @@ def annotate_video2(video_path: Path, output_path: Path, pose: xr.DataArray, ske
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+    fourcc = cv2.VideoWriter_fourcc(*'MP4V')
     out = cv2.VideoWriter(str(output_path), fourcc, fps, (frame_width, frame_height))
 
     num_bodyparts = pose.sizes["bodyparts"]
@@ -283,13 +283,15 @@ def annotate_video(video_path: Path, output_path: Path, pose: xr.DataArray, radi
     import matplotlib.cm as cm
     import numba
 
+    radius=5
+
     cap = cv2.VideoCapture(str(video_path))
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+    fourcc = cv2.VideoWriter_fourcc(*'MP4V')
     out = cv2.VideoWriter(str(output_path), fourcc, fps, (frame_width, frame_height))
 
     num_bodyparts = pose.sizes["bodyparts"]
@@ -300,10 +302,17 @@ def annotate_video(video_path: Path, output_path: Path, pose: xr.DataArray, radi
     colors = np.array([tuple(int(c * 255) for c in cmap(i)[:3]) for i in range(num_bodyparts)])
 
     # Precompute circle offsets
+    
     def circle_offsets(radius):
-        yy, xx = np.ogrid[-radius:radius+1, -radius:radius+1]
-        circle = xx**2 + yy**2 <= radius**2
-        return np.column_stack((xx[circle], yy[circle]))
+        y, x = np.ogrid[-radius:radius+1, -radius:radius+1]
+        circle = x**2 + y**2 <= radius**2
+
+        ys, xs = np.where(circle)  # matching shapes (N,)
+        ys = ys - radius           # convert grid index back to coordinates
+        xs = xs - radius
+
+        return np.column_stack((xs, ys))
+
 
     circle_coords = [circle_offsets(radius) for _ in range(num_bodyparts)]
 
@@ -324,7 +333,7 @@ def annotate_video(video_path: Path, output_path: Path, pose: xr.DataArray, radi
         .astype(int)
     )
 
-    p = pose.sel(coords="p").transpose("frame_num", "bodyparts").to_numpy()
+    p = pose.sel(coords="likelihood").transpose("frame_num", "bodyparts").to_numpy()
 
     @numba.njit
     def stamp_circles(frame, xs, ys, ps, coords_list, colors, threshold=0.8):
