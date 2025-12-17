@@ -61,12 +61,9 @@ def compress_video(
         raise RuntimeError(f"FFmpeg compression failed:\n{error_message}")
     
 
-def get_luminosity(annotation_num, video_path, fig_output_path, max_n_frames):
+def get_luminosity(annotation_num, video_path, fig_output_path, max_n_frames, label_studio_url, api_key):
     from label_studio_sdk import LabelStudio
     import pandas as pd, cv2
-
-    api_key="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoicmVmcmVzaCIsImV4cCI6ODA3MDg1MzIyOSwiaWF0IjoxNzYzNjUzMjI5LCJqdGkiOiJhYzAwZjJkNWNlMzM0M2M0YTdjODVlZTc2MjgzMTQxOSIsInVzZXJfaWQiOiIyNSJ9.hb4En4u-wECC6h_7iqpcwA0gztb0ngby6GZBTl-_qcE"
-    label_studio_url = "http://10.24.12.184/labelstudio/"
 
     ls_client = LabelStudio(base_url=label_studio_url, api_key=api_key)
     data = ls_client.annotations.get(id=annotation_num).result
