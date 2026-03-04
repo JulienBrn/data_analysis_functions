@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -56,7 +55,7 @@ def smrxchanneldata(smrx_path: Path) -> pd.DataFrame:
     )
 
 
-def smrxadc2electrophy(smrx_path: Path, channel_nums: list[int | Any] = [...]) -> xr.DataArray:
+def smrxadc2electrophy(smrx_path: Path, channel_nums: list[int] = [...]) -> xr.DataArray:
     channel_metadata = smrxchanneldata(smrx_path)
     if ... in channel_nums:
         channel_nums = [
