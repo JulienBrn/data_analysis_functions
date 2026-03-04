@@ -2,6 +2,7 @@ import subprocess
 from pathlib import Path
 import plotly.express as px
 import numpy as np, xarray as xr, tqdm, pandas as pd
+from typing import Literal
 
 def compress_video(
     video_path: Path,
@@ -133,7 +134,7 @@ def get_luminosity(annotation_num, video_path, fig_output_path, max_n_frames, la
     luminosities = luminosities/image["mask"].sum(["y", "x"])
     return luminosities
 
-def dlc_predict(model_path: Path, video_path: Path) -> xr.DataArray:
+def dlc_predict(model_path: Path, video_path: Path, device: Literal["cpu"] | int | None = None) -> xr.DataArray:
     import deeplabcut, tempfile
     with tempfile.TemporaryDirectory() as dlc_dest:
         print(dlc_dest)
@@ -141,7 +142,7 @@ def dlc_predict(model_path: Path, video_path: Path) -> xr.DataArray:
             f'{model_path}/config.yaml',
             [str(video_path)],
             save_as_csv=False,
-            gputouse=0,
+            gputouse=device,
             destfolder=dlc_dest
         )
         h5_file = next(Path(dlc_dest).glob("*.h5"), None)

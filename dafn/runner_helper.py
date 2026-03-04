@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Annotated, Tuple, Literal, Union, TypeVar, Generic, ContextManager
 import xarray as xr, pandas as pd, numpy as np, dask
 
-with Path("/home/t4user/mamserverssd/Server/ServerApps/task_manager/configs/config.yaml").open("r") as f:
+with Path("/home/jbraine/Server/ServerApps/task_manager/configs/config.yaml").open("r") as f:
     config = yaml.safe_load(f)
 
 start_path_patterns = list(config["path_mappings"].values())
